@@ -1,0 +1,11 @@
+# $FreeBSD$
+
+.PATH:	${SRCTOP}/sys/dev/mana
+
+KMOD	= if_mana
+SRCS	= mana.c mana_sysctl.c
+SRCS	+= device_if.h bus_if.h pci_if.h
+
+CFLAGS  += -I${SRCTOP}/sys/dev/mana
+
+.include <bsd.kmod.mk>

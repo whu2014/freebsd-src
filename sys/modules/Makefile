@@ -228,6 +228,7 @@ SUBDIR=	\
 	mac_stub \
 	mac_test \
 	${_malo} \
+	${_mana} \
 	md \
 	mdio \
 	mem \
@@ -642,6 +643,7 @@ _ixv=		ixv
 .if ${MK_SOURCELESS_UCODE} != "no"
 _lio=		lio
 .endif
+_mana=		mana
 _nctgpio=	nctgpio
 _ntb=		ntb
 _ocs_fc=	ocs_fc
