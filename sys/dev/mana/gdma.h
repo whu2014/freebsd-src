@@ -37,7 +37,7 @@
 #include <sys/types.h>
 
 struct gdma_context {
-	device_t		*dev;
+	device_t		dev;
 };
 
 #endif /* _GDMA_H */

@@ -3446,7 +3446,45 @@ static int
 mana_gd_attach(device_t pdev)
 {
 #if 1
+	struct gdma_context *gc;
+	int i;
+	struct pci_map *pm;
+	int type;
+	int rid, msix_rid;
+	struct resource *res;
+
 	mana_trc_dbg(NULL, "mana_gd_attach called\n");
+
+	gc = device_get_softc(pdev);
+	gc->dev = pdev;
+
+	pci_enable_io(pdev, SYS_RES_IOPORT);
+	pci_enable_io(pdev, SYS_RES_MEMORY);
+
+	pci_enable_busmaster(pdev);
+
+	msix_rid = pci_msix_table_bar(pdev);
+	mana_trc_dbg(NULL, "msix_rid 0x%x\n", msix_rid);
+
+	for (i = 0; i <= PCIR_MAX_BAR_0; i++) {
+		pm = pci_find_bar(pdev, PCIR_BAR(i));
+		if (!pm)
+			continue;
+
+		if (PCI_BAR_IO(pm->pm_value))
+			type = SYS_RES_IOPORT;
+		else
+			type = SYS_RES_MEMORY;
+		if (type < 0)
+			continue;
+		rid = PCIR_BAR(i);
+		res = bus_alloc_resource_any(pdev, type, &rid, RF_ACTIVE);
+		if (res == NULL)
+			return ENOMEM;
+
+		mana_trc_dbg(NULL, "bar %d: rid 0x%x, type 0x%jx, handle 0x%jx\n",
+		    i, rid, res->r_bustag, res->r_bushandle);
+	}
 	return (0);
 #else
 	struct ena_com_dev_get_features_ctx get_feat_ctx;
