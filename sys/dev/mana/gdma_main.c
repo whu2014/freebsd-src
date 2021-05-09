@@ -88,6 +88,10 @@ static int	mana_gd_probe(device_t);
 static int	mana_gd_attach(device_t);
 static int	mana_gd_detach(device_t);
 static struct resource *mana_gd_alloc_bar(device_t, int);
+static void	mana_gd_init_registers(struct gdma_context *);
+static void	mana_gd_free_pci_res(struct gdma_context *);
+static inline uint32_t mana_gd_r32(struct gdma_context *, uint64_t);
+static inline uint64_t mana_gd_r64(struct gdma_context *, uint64_t);
 
 // static char mana_version[] = DEVICE_NAME DRV_MODULE_NAME " v" DRV_MODULE_VERSION;
 
@@ -98,6 +102,42 @@ static mana_vendor_id_t mana_id_table[] = {
 };
 
 #if 1 /*whu */
+static inline uint32_t
+mana_gd_r32(struct gdma_context *g, uint64_t offset)
+{
+	uint32_t v = bus_space_read_4(g->gd_bus.bar0_t,
+	    g->gd_bus.bar0_h, offset);
+	rmb();
+	return (v);
+}
+
+static inline uint64_t
+mana_gd_r64(struct gdma_context *g, uint64_t offset)
+{
+	uint64_t v = bus_space_read_8(g->gd_bus.bar0_t,
+	    g->gd_bus.bar0_h, offset);
+	rmb();
+	return (v);
+}
+
+static void
+mana_gd_init_registers(struct gdma_context *gc)
+{
+	uint64_t bar0_va = rman_get_bushandle(gc->bar0);
+
+	gc->db_page_size = mana_gd_r32(gc, GDMA_REG_DB_PAGE_SIZE) & 0xFFFF;
+
+	gc->db_page_base =
+	    (void *) (bar0_va + mana_gd_r64(gc, GDMA_REG_DB_PAGE_OFFSET));
+
+	gc->shm_base =
+	    (void *) (bar0_va + mana_gd_r64(gc, GDMA_REG_SHM_OFFSET));
+
+	mana_trc_dbg(NULL, "db_page_size 0x%xx, db_page_base %p,"
+		    " shm_base %p\n",
+		    gc->db_page_size, gc->db_page_base, gc->shm_base);
+}
+
 static struct resource *
 mana_gd_alloc_bar(device_t dev, int bar)
 {
@@ -127,7 +167,19 @@ mana_gd_alloc_bar(device_t dev, int bar)
 		    bar, rid, res->r_bustag, res->r_bushandle);
 
 alloc_bar_out:
-	return(res);
+	return (res);
+}
+
+static void
+mana_gd_free_pci_res(struct gdma_context *gc)
+{
+	if (!gc || gc->dev)
+		return;
+
+	if (gc->bar0 != NULL) {
+		bus_release_resource(gc->dev, SYS_RES_MEMORY,
+		    PCIR_BAR(GDMA_BAR0), gc->bar0);
+	}
 }
 #else  /*whu*/
 #endif /*whu*/
@@ -200,8 +252,24 @@ mana_gd_attach(device_t dev)
 		goto err_disable_dev;
 	}
 
+	/* Store bar0 tage and handle for quick access */
+	gc->gd_bus.bar0_t = rman_get_bustag(gc->bar0);
+	gc->gd_bus.bar0_h = rman_get_bushandle(gc->bar0);
+
+	if (unlikely(gc->gd_bus.bar0_h  == 0)) {
+		device_printf(dev, "failed to map bar0!\n");
+		rc = ENXIO;
+		goto err_free_pci_res;
+	}
+
+	mana_gd_init_registers(gc);
+
+	mana_smc_init(&gc->shm_channel, gc->dev, gc->shm_base);
+
 	return (0);
 
+err_free_pci_res:
+	mana_gd_free_pci_res(gc);
 err_disable_dev:
 	pci_disable_busmaster(dev);
 
@@ -216,11 +284,17 @@ err_disable_dev:
  * that it should release a PCI device.
  **/
 static int
-mana_gd_detach(device_t pdev)
+mana_gd_detach(device_t dev)
 {
 #if 1
+	struct gdma_context *gc = device_get_softc(dev);
 	mana_trc_dbg(NULL, "mana_gd_detach called\n");
-	return (bus_generic_detach(pdev));
+
+	mana_gd_free_pci_res(gc);
+
+	pci_disable_busmaster(dev);
+
+	return (bus_generic_detach(dev));
 #else
 #endif
 }

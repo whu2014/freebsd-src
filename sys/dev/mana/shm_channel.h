@@ -31,37 +31,16 @@
  *
  */
 
-#ifndef _GDMA_H
-#define _GDMA_H
+#ifndef _SHM_CHANNEL_H
+#define _SHM_CHANNEL_H
 
-#include <sys/bus.h>
-#include <sys/types.h>
+#define __iomem
 
-#include "shm_channel.h"
-
-#define GDMA_BAR0		0
-
-struct gdma_bus {
-	bus_space_handle_t	bar0_h;
-	bus_space_tag_t		bar0_t;
-};
-
-struct gdma_context {
+struct shm_channel {
 	device_t		dev;
-
-	struct gdma_bus		gd_bus;
-
-	struct resource		*bar0;
-	void __iomem		*shm_base;
-	void __iomem		*db_page_base;
-	uint32_t		db_page_size;
-
-	/* Shared memory chanenl (used to bootstrap HWC) */
-	struct shm_channel	shm_channel;
+	void __iomem		*base;
 };
 
-#define GDMA_REG_DB_PAGE_OFFSET	8
-#define GDMA_REG_DB_PAGE_SIZE	0x10
-#define GDMA_REG_SHM_OFFSET	0x18
+void mana_smc_init(struct shm_channel *sc, device_t dev, void __iomem *base);
 
-#endif /* _GDMA_H */
+#endif /* _SHM_CHANNEL_H */
