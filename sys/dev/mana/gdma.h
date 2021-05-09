@@ -36,8 +36,12 @@
 
 #include <sys/types.h>
 
+#define GDMA_BAR0		0
+
 struct gdma_context {
 	device_t		dev;
+
+	struct resource *bar0;
 };
 
 #endif /* _GDMA_H */

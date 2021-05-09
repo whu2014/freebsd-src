@@ -87,6 +87,7 @@ __FBSDID("$FreeBSD$");
 static int	mana_gd_probe(device_t);
 static int	mana_gd_attach(device_t);
 static int	mana_gd_detach(device_t);
+static struct resource *mana_gd_alloc_bar(device_t, int);
 
 // static char mana_version[] = DEVICE_NAME DRV_MODULE_NAME " v" DRV_MODULE_VERSION;
 
@@ -97,6 +98,38 @@ static mana_vendor_id_t mana_id_table[] = {
 };
 
 #if 1 /*whu */
+static struct resource *
+mana_gd_alloc_bar(device_t dev, int bar)
+{
+	struct resource *res = NULL;
+	struct pci_map *pm;
+	int rid, type;
+
+	if (bar < 0 || bar > PCIR_MAX_BAR_0)
+		goto alloc_bar_out;
+
+	pm = pci_find_bar(dev, PCIR_BAR(bar));
+	if (!pm)
+		goto alloc_bar_out;
+
+	if (PCI_BAR_IO(pm->pm_value))
+		type = SYS_RES_IOPORT;
+	else
+		type = SYS_RES_MEMORY;
+	if (type < 0)
+		goto alloc_bar_out;
+
+	rid = PCIR_BAR(bar);
+	res = bus_alloc_resource_any(dev, type, &rid, RF_ACTIVE);
+	if (res)
+		mana_trc_dbg(NULL, "bar %d: rid 0x%x, type 0x%jx,"
+		    " handle 0x%jx\n",
+		    bar, rid, res->r_bustag, res->r_bushandle);
+
+alloc_bar_out:
+	return(res);
+}
+#else  /*whu*/
 #endif /*whu*/
 
 static int
@@ -114,7 +147,7 @@ mana_gd_probe(device_t dev)
 	while (ent->vendor_id != 0) {
 		if ((pci_vendor_id == ent->vendor_id) &&
 		    (pci_device_id == ent->device_id)) {
-			mana_trace(NULL, MANA_DBG, "vendor=%x device=%x\n",
+			mana_trc_dbg(NULL, "vendor=%x device=%x\n",
 			    pci_vendor_id, pci_device_id);
 
 			sprintf(adapter_name, DEVICE_DESC);
@@ -123,7 +156,6 @@ mana_gd_probe(device_t dev)
 		}
 
 		ent++;
-
 	}
 
 	return (ENXIO);
@@ -131,7 +163,7 @@ mana_gd_probe(device_t dev)
 
 /**
  * mana_attach - Device Initialization Routine
- * @pdev: device information struct
+ * @dev: device information struct
  *
  * Returns 0 on success, otherwise on failure.
  *
@@ -140,51 +172,40 @@ mana_gd_probe(device_t dev)
  * and a hardware reset occur.
  **/
 static int
-mana_gd_attach(device_t pdev)
+mana_gd_attach(device_t dev)
 {
-#if 1
 	struct gdma_context *gc;
-	int i;
-	struct pci_map *pm;
-	int type;
-	int rid, msix_rid;
-	struct resource *res;
+	int rc;
 
 	mana_trc_dbg(NULL, "mana_gd_attach called\n");
 
-	gc = device_get_softc(pdev);
-	gc->dev = pdev;
+	gc = device_get_softc(dev);
+	gc->dev = dev;
 
-	pci_enable_io(pdev, SYS_RES_IOPORT);
-	pci_enable_io(pdev, SYS_RES_MEMORY);
+	pci_enable_io(dev, SYS_RES_IOPORT);
+	pci_enable_io(dev, SYS_RES_MEMORY);
 
-	pci_enable_busmaster(pdev);
+	pci_enable_busmaster(dev);
 
-	msix_rid = pci_msix_table_bar(pdev);
+#if 0
+	msix_rid = pci_msix_table_bar(dev);
 	mana_trc_dbg(NULL, "msix_rid 0x%x\n", msix_rid);
-
-	for (i = 0; i <= PCIR_MAX_BAR_0; i++) {
-		pm = pci_find_bar(pdev, PCIR_BAR(i));
-		if (!pm)
-			continue;
-
-		if (PCI_BAR_IO(pm->pm_value))
-			type = SYS_RES_IOPORT;
-		else
-			type = SYS_RES_MEMORY;
-		if (type < 0)
-			continue;
-		rid = PCIR_BAR(i);
-		res = bus_alloc_resource_any(pdev, type, &rid, RF_ACTIVE);
-		if (res == NULL)
-			return ENOMEM;
-
-		mana_trc_dbg(NULL, "bar %d: rid 0x%x, type 0x%jx, handle 0x%jx\n",
-		    i, rid, res->r_bustag, res->r_bushandle);
-	}
-	return (0);
-#else
 #endif
+
+	gc->bar0 = mana_gd_alloc_bar(dev, GDMA_BAR0);
+	if (unlikely(gc->bar0 == NULL)) {
+		device_printf(dev,
+		    "unable to allocate bus resource for bar0!\n");
+		rc = ENOMEM;
+		goto err_disable_dev;
+	}
+
+	return (0);
+
+err_disable_dev:
+	pci_disable_busmaster(dev);
+
+	return(rc);
 }
 
 /**
