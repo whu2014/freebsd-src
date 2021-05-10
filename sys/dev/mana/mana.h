@@ -107,4 +107,12 @@ typedef struct _mana_vendor_id_t {
 	uint16_t device_id;
 } mana_vendor_id_t;
 
+#if 1 /*XXX */
+#define MAX_PORTS_IN_MANA_DEV	1
+#else
+#define MAX_PORTS_IN_MANA_DEV	16
+#endif
+
+#define MANA_MAX_NUM_QUEUES	16
+
 #endif /* _MANA_H */

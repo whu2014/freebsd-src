@@ -92,6 +92,8 @@ static void	mana_gd_init_registers(struct gdma_context *);
 static void	mana_gd_free_pci_res(struct gdma_context *);
 static inline uint32_t mana_gd_r32(struct gdma_context *, uint64_t);
 static inline uint64_t mana_gd_r64(struct gdma_context *, uint64_t);
+static int	 mana_gd_intr(void *);
+static int	 mana_gd_setup_irqs(device_t);
 
 // static char mana_version[] = DEVICE_NAME DRV_MODULE_NAME " v" DRV_MODULE_VERSION;
 
@@ -118,6 +120,46 @@ mana_gd_r64(struct gdma_context *g, uint64_t offset)
 	    g->gd_bus.bar0_h, offset);
 	rmb();
 	return (v);
+}
+
+/* XXX filter handler or intr handler? */
+static int
+mana_gd_intr(void *arg)
+{
+	struct gdma_irq_context *gic = arg;
+
+	if (gic->handler)
+		gic->handler(gic->arg);
+
+	return (FILTER_HANDLED);
+}
+
+int
+mana_gd_alloc_res_map(uint32_t res_avail,
+    struct gdma_resource *r, const char *name)
+{
+	int n = howmany(res_avail , sizeof(unsigned long));
+
+	r->map =
+	    malloc(n * sizeof(unsigned long), M_DEVBUF, M_WAITOK | M_ZERO);
+	if (!r->map)
+		return ENOMEM;
+
+	r->size = res_avail;
+	mtx_init(&r->lock_spin, name, NULL, MTX_SPIN);
+
+	return (0);
+}
+
+void
+mana_gd_free_res_map(struct gdma_resource *r)
+{
+	if (!r || !r->map)
+		return;
+
+	free(r->map, M_DEVBUF);
+	r->map = NULL;
+	r->size = 0;
 }
 
 static void
@@ -180,6 +222,143 @@ mana_gd_free_pci_res(struct gdma_context *gc)
 		bus_release_resource(gc->dev, SYS_RES_MEMORY,
 		    PCIR_BAR(GDMA_BAR0), gc->bar0);
 	}
+
+	if (gc->msix != NULL) {
+		bus_release_resource(gc->dev, SYS_RES_MEMORY,
+		    gc->msix_rid, gc->msix);
+	}
+}
+
+static int
+mana_gd_setup_irqs(device_t dev)
+{
+	unsigned int max_queues_per_port = mp_ncpus;
+	struct gdma_context *gc = device_get_softc(dev);
+	struct gdma_irq_context *gic;
+	unsigned int max_irqs;
+	int nvec;
+	int rc, rcc, i;
+
+	if (max_queues_per_port > MANA_MAX_NUM_QUEUES)
+		max_queues_per_port = MANA_MAX_NUM_QUEUES;
+
+	max_irqs = max_queues_per_port * MAX_PORTS_IN_MANA_DEV;
+
+	/* Need 1 interrupt for the Hardware communication Channel (HWC) */
+	max_irqs++;
+
+	nvec = max_irqs;
+	rc = pci_alloc_msix(dev, &nvec);
+	if (unlikely(rc != 0)) {
+		device_printf(dev,
+		    "Failed to allocate MSIX, vectors %d, error: %d\n",
+		    nvec, rc);
+		rc = ENOSPC;
+		goto err_setup_irq_alloc;
+	}
+
+	if (nvec != max_irqs) {
+		if (nvec == 1) {
+			device_printf(dev,
+			    "Not enough number of MSI-x allocated: %d\n",
+			    nvec);
+			rc = ENOSPC;
+			goto err_setup_irq_release;
+		}
+		device_printf(dev, "Allocated only %d MSI-x (%d requested)\n",
+		    nvec, max_irqs);
+	}
+
+	gc->irq_contexts = malloc(nvec * sizeof(struct gdma_irq_context),
+	    M_DEVBUF, M_WAITOK | M_ZERO);
+	if (!gc->irq_contexts) {
+		rc = ENOMEM;
+		goto err_setup_irq_release;
+	}
+
+	for (i = 0; i < nvec; i++) {
+		gic = &gc->irq_contexts[i];
+		gic->msix_e.entry = i;
+		/* Vector starts from 1. */
+		/* XXX if remapped, vector would be changed. */
+		gic->msix_e.vector = i + 1;
+		gic->handler = NULL;
+		gic->arg = NULL;
+
+		gic->res = bus_alloc_resource_any(dev, SYS_RES_IRQ,
+		    &gic->msix_e.vector, RF_ACTIVE | RF_SHAREABLE);
+		if (unlikely(gic->res == NULL)) {
+			rc = ENOMEM;
+			device_printf(dev, "could not allocate resource "
+			    "for irq vector %d\n", gic->msix_e.vector);
+			goto err_setup_irq;
+		}
+
+		rc = bus_setup_intr(dev, gic->res,
+		    INTR_TYPE_NET | INTR_MPSAFE, mana_gd_intr, NULL,
+		    gic, &gic->cookie);
+		if (unlikely(rc != 0)) {
+			device_printf(dev, "failed to register interrupt "
+			    "handler for irq %ju vector %d: error %d\n",
+			    rman_get_start(gic->res), gic->msix_e.vector, rc);
+			goto err_setup_irq;
+		}
+		gic->requested = true;
+
+		mana_trc_dbg(NULL, "added msix vector %d irq %ju\n",
+		    gic->msix_e.vector, rman_get_start(gic->res));
+	}
+
+	rc = mana_gd_alloc_res_map(nvec, &gc->msix_resource,
+	    "gdma msix res lock");
+	if (rc != 0) {
+		device_printf(dev, "failed to allocate memory "
+		    "for msix bitmap\n");
+		goto err_setup_irq;
+	}
+
+	gc->max_num_msix = nvec;
+	gc->num_msix_usable = nvec;
+
+	mana_trc_dbg(NULL, "setup %d msix interrupts\n", nvec);
+
+	return (0);
+
+err_setup_irq:
+	for (; i >= 0; i--) {
+		gic = &gc->irq_contexts[i];
+		rcc = 0;
+
+		/*
+		 * If gic->requested is true, we need to free both intr and
+		 * resources.
+		 */
+		if (gic->requested)
+			rcc = bus_teardown_intr(dev, gic->res, gic->cookie);
+		if (unlikely(rcc != 0))
+			device_printf(dev, "could not release "
+			    "irq vector %d, error: %d\n",
+			    gic->msix_e.vector, rcc);
+
+		rcc = 0;
+		if (gic->res != NULL) {
+			rcc = bus_release_resource(dev, SYS_RES_IRQ,
+			    gic->msix_e.vector, gic->res);
+		}
+		if (unlikely(rcc != 0))
+			device_printf(dev, "dev has no parent while "
+			    "releasing resource for irq vector %d\n",
+			    gic->msix_e.vector);
+		gic->requested = false;
+		gic->res = NULL;
+	}
+
+	free(gc->irq_contexts, M_DEVBUF);
+	gc->irq_contexts = NULL;
+err_setup_irq_release:
+	pci_release_msi(dev);
+err_setup_irq_alloc:
+	return (rc);
 }
 #else  /*whu*/
 #endif /*whu*/
@@ -227,6 +406,7 @@ static int
 mana_gd_attach(device_t dev)
 {
 	struct gdma_context *gc;
+	int msix_rid;
 	int rc;
 
 	mana_trc_dbg(NULL, "mana_gd_attach called\n");
@@ -238,11 +418,6 @@ mana_gd_attach(device_t dev)
 	pci_enable_io(dev, SYS_RES_MEMORY);
 
 	pci_enable_busmaster(dev);
-
-#if 0
-	msix_rid = pci_msix_table_bar(dev);
-	mana_trc_dbg(NULL, "msix_rid 0x%x\n", msix_rid);
-#endif
 
 	gc->bar0 = mana_gd_alloc_bar(dev, GDMA_BAR0);
 	if (unlikely(gc->bar0 == NULL)) {
@@ -256,6 +431,23 @@ mana_gd_attach(device_t dev)
 	gc->gd_bus.bar0_t = rman_get_bustag(gc->bar0);
 	gc->gd_bus.bar0_h = rman_get_bushandle(gc->bar0);
 
+	/* Map MSI-x vector table */
+#if 1
+	msix_rid = pci_msix_table_bar(dev);
+
+	mana_trc_dbg(NULL, "msix_rid 0x%x\n", msix_rid);
+
+	gc->msix = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
+	    &msix_rid, RF_ACTIVE);
+	if (unlikely(gc->msix == NULL)) {
+		device_printf(dev,
+		    "unable to allocate bus resource for msix!\n");
+		rc = ENOMEM;
+		goto err_free_pci_res;
+	}
+	gc->msix_rid = msix_rid;
+#endif
+
 	if (unlikely(gc->gd_bus.bar0_h  == 0)) {
 		device_printf(dev, "failed to map bar0!\n");
 		rc = ENXIO;
@@ -265,6 +457,10 @@ mana_gd_attach(device_t dev)
 	mana_gd_init_registers(gc);
 
 	mana_smc_init(&gc->shm_channel, gc->dev, gc->shm_base);
+
+	rc = mana_gd_setup_irqs(dev);
+	if (rc)
+		goto err_free_pci_res;
 
 	return (0);
 
