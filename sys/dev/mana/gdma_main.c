@@ -94,6 +94,7 @@ static inline uint32_t mana_gd_r32(struct gdma_context *, uint64_t);
 static inline uint64_t mana_gd_r64(struct gdma_context *, uint64_t);
 static int	 mana_gd_intr(void *);
 static int	 mana_gd_setup_irqs(device_t);
+static void	 mana_gd_remove_irqs(device_t);
 
 // static char mana_version[] = DEVICE_NAME DRV_MODULE_NAME " v" DRV_MODULE_VERSION;
 
@@ -360,6 +361,48 @@ err_setup_irq_release:
 err_setup_irq_alloc:
 	return (rc);
 }
+
+static void
+mana_gd_remove_irqs(device_t dev)
+{
+	struct gdma_context *gc = device_get_softc(dev);
+	struct gdma_irq_context *gic;
+	int rc, i;
+
+	mana_gd_free_res_map(&gc->msix_resource);
+
+	for (i = 0; i < gc->max_num_msix; i++) {
+		gic = &gc->irq_contexts[i];
+		if (gic->requested) {
+			rc = bus_teardown_intr(dev, gic->res, gic->cookie);
+			if (unlikely(rc != 0)) {
+				device_printf(dev, "failed to tear down "
+				    "irq vector %d, error: %d\n",
+				    gic->msix_e.vector, rc);
+			}
+			gic->requested = false;
+		}
+
+		if (gic->res != NULL) {
+			rc = bus_release_resource(dev, SYS_RES_IRQ,
+			    gic->msix_e.vector, gic->res);
+			if (unlikely(rc != 0)) {
+				device_printf(dev, "dev has no parent while "
+				    "releasing resource for irq vector %d\n",
+				    gic->msix_e.vector);
+			}
+			gic->res = NULL;
+		}
+	}
+
+	gc->max_num_msix = 0;
+	gc->num_msix_usable = 0;
+	free(gc->irq_contexts, M_DEVBUF);
+	gc->irq_contexts = NULL;
+
+	pci_release_msi(dev);
+}
+
 #else  /*whu*/
 #endif /*whu*/
 
@@ -462,8 +505,19 @@ mana_gd_attach(device_t dev)
 	if (rc)
 		goto err_free_pci_res;
 
+	mtx_init(&gc->eq_test_event_mutex,
+	    "gdma test event lock", NULL, MTX_DEF);
+
+#if 0
+	rc = mana_hwc_create_channel(gc);
+	if (rc)
+		goto err_remove_irq;
+#endif
+
 	return (0);
 
+// err_remove_irq:
+	mana_gd_remove_irqs(dev);
 err_free_pci_res:
 	mana_gd_free_pci_res(gc);
 err_disable_dev:
