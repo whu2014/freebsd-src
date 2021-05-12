@@ -429,11 +429,302 @@ struct gdma_context {
 	struct shm_channel	shm_channel;
 };
 
+#define MAX_NUM_GDMA_DEVICES	4
+
+static inline bool mana_gd_is_mana(struct gdma_dev *gd)
+{
+	return gd->dev_id.type == GDMA_DEVICE_MANA;
+}
+
+static inline bool mana_gd_is_hwc(struct gdma_dev *gd)
+{
+	return gd->dev_id.type == GDMA_DEVICE_HWC;
+}
+
+uint8_t *mana_gd_get_wqe_ptr(const struct gdma_queue *wq, uint32_t wqe_offset);
+uint32_t mana_gd_wq_avail_space(struct gdma_queue *wq);
+
+int mana_gd_test_eq(struct gdma_context *gc, struct gdma_queue *eq);
+
+int mana_gd_create_hwc_queue(struct gdma_dev *gd,
+    const struct gdma_queue_spec *spec,
+    struct gdma_queue **queue_ptr);
+
+int mana_gd_create_mana_eq(struct gdma_dev *gd,
+    const struct gdma_queue_spec *spec,
+    struct gdma_queue **queue_ptr);
+
+int mana_gd_create_mana_wq_cq(struct gdma_dev *gd,
+    const struct gdma_queue_spec *spec,
+    struct gdma_queue **queue_ptr);
+
+void mana_gd_destroy_queue(struct gdma_context *gc, struct gdma_queue *queue);
+
+int mana_gd_poll_cq(struct gdma_queue *cq, struct gdma_comp *comp, int num_cqe);
+
+void mana_gd_arm_cq(struct gdma_queue *cq);
+
+struct gdma_wqe {
+	uint32_t reserved	:24;
+	uint32_t last_vbytes	:8;
+
+	union {
+		uint32_t flags;
+
+		struct {
+			uint32_t num_sge		:8;
+			uint32_t inline_oob_size_div4:3;
+			uint32_t client_oob_in_sgl	:1;
+			uint32_t reserved1		:4;
+			uint32_t client_data_unit	:14;
+			uint32_t reserved2		:2;
+		};
+	};
+}; /* HW DATA */
+
+#define INLINE_OOB_SMALL_SIZE	8
+#define INLINE_OOB_LARGE_SIZE	24
+
+#define MAX_TX_WQE_SIZE		512
+#define MAX_RX_WQE_SIZE		256
+
+struct gdma_cqe {
+	uint32_t cqe_data[GDMA_COMP_DATA_SIZE / 4];
+
+	union {
+		uint32_t as_uint32;
+
+		struct {
+			uint32_t wq_num		:24;
+			uint32_t is_sq		:1;
+			uint32_t reserved	:4;
+			uint32_t owner_bits	:3;
+		};
+	} cqe_info;
+}; /* HW DATA */
+
+#define GDMA_CQE_OWNER_BITS	3
+
+#define GDMA_CQE_OWNER_MASK	((1 << GDMA_CQE_OWNER_BITS) - 1)
+
+#define SET_ARM_BIT		1
+
+#define GDMA_EQE_OWNER_BITS	3
+
+union gdma_eqe_info {
+	uint32_t as_uint32;
+
+	struct {
+		uint32_t type		: 8;
+		uint32_t reserved1	: 8;
+		uint32_t client_id	: 2;
+		uint32_t reserved2	: 11;
+		uint32_t owner_bits	: 3;
+	};
+}; /* HW DATA */
+
+#define GDMA_EQE_OWNER_MASK	((1 << GDMA_EQE_OWNER_BITS) - 1)
+#define INITIALIZED_OWNER_BIT(log2_num_entries)	(1UL << (log2_num_entries))
+
+struct gdma_eqe {
+	uint32_t details[GDMA_EVENT_DATA_SIZE / 4];
+	uint32_t eqe_info;
+}; /* HW DATA */
+
 #define GDMA_REG_DB_PAGE_OFFSET	8
 #define GDMA_REG_DB_PAGE_SIZE	0x10
 #define GDMA_REG_SHM_OFFSET	0x18
 
+struct gdma_posted_wqe_info {
+	uint32_t wqe_size_in_bu;
+};
+
+/* GDMA_GENERATE_TEST_EQE */
+struct gdma_generate_test_event_req {
+	struct gdma_req_hdr hdr;
+	uint32_t queue_index;
+}; /* HW DATA */
+
+/* GDMA_VERIFY_VF_DRIVER_VERSION */
+enum {
+	GDMA_PROTOCOL_V1	= 1,
+	GDMA_PROTOCOL_FIRST	= GDMA_PROTOCOL_V1,
+	GDMA_PROTOCOL_LAST	= GDMA_PROTOCOL_V1,
+};
+
+struct gdma_verify_ver_req {
+	struct gdma_req_hdr hdr;
+
+	/* Mandatory fields required for protocol establishment */
+	uint64_t protocol_ver_min;
+	uint64_t protocol_ver_max;
+	uint64_t drv_cap_flags1;
+	uint64_t drv_cap_flags2;
+	uint64_t drv_cap_flags3;
+	uint64_t drv_cap_flags4;
+
+	/* Advisory fields */
+	uint64_t drv_ver;
+	uint32_t os_type; /* Linux = 0x10; Windows = 0x20; Other = 0x30 */
+	uint32_t reserved;
+	uint32_t os_ver_major;
+	uint32_t os_ver_minor;
+	uint32_t os_ver_build;
+	uint32_t os_ver_platform;
+	uint64_t reserved_2;
+	uint8_t os_ver_str1[128];
+	uint8_t os_ver_str2[128];
+	uint8_t os_ver_str3[128];
+	uint8_t os_ver_str4[128];
+}; /* HW DATA */
+
+struct gdma_verify_ver_resp {
+	struct gdma_resp_hdr hdr;
+	uint64_t gdma_protocol_ver;
+	uint64_t pf_cap_flags1;
+	uint64_t pf_cap_flags2;
+	uint64_t pf_cap_flags3;
+	uint64_t pf_cap_flags4;
+}; /* HW DATA */
+
+/* GDMA_QUERY_MAX_RESOURCES */
+struct gdma_query_max_resources_resp {
+	struct gdma_resp_hdr hdr;
+	uint32_t status;
+	uint32_t max_sq;
+	uint32_t max_rq;
+	uint32_t max_cq;
+	uint32_t max_eq;
+	uint32_t max_db;
+	uint32_t max_mst;
+	uint32_t max_cq_mod_ctx;
+	uint32_t max_mod_cq;
+	uint32_t max_msix;
+}; /* HW DATA */
+
+/* GDMA_LIST_DEVICES */
+struct gdma_list_devices_resp {
+	struct gdma_resp_hdr hdr;
+	uint32_t num_of_devs;
+	uint32_t reserved;
+	struct gdma_dev_id devs[64];
+}; /* HW DATA */
+
+/* GDMA_REGISTER_DEVICE */
+struct gdma_register_device_resp {
+	struct gdma_resp_hdr hdr;
+	uint32_t pdid;
+	uint32_t gpa_mkey;
+	uint32_t db_id;
+}; /* HW DATA */
+
+/* GDMA_CREATE_QUEUE */
+struct gdma_create_queue_req {
+	struct gdma_req_hdr hdr;
+	uint32_t type;
+	uint32_t reserved1;
+	uint32_t pdid;
+	uint32_t doolbell_id;
+	uint64_t gdma_region;
+	uint32_t reserved2;
+	uint32_t queue_size;
+	uint32_t log2_throttle_limit;
+	uint32_t eq_pci_msix_index;
+	uint32_t cq_mod_ctx_id;
+	uint32_t cq_parent_eq_id;
+	uint8_t  rq_drop_on_overrun;
+	uint8_t  rq_err_on_wqe_overflow;
+	uint8_t  rq_chain_rec_wqes;
+	uint8_t  sq_hw_db;
+	uint32_t reserved3;
+}; /* HW DATA */
+
+struct gdma_create_queue_resp {
+	struct gdma_resp_hdr hdr;
+	uint32_t queue_index;
+}; /* HW DATA */
+
+/* GDMA_DISABLE_QUEUE */
+struct gdma_disable_queue_req {
+	struct gdma_req_hdr hdr;
+	uint32_t type;
+	uint32_t queue_index;
+	uint32_t alloc_res_id_on_creation;
+}; /* HW DATA */
+
+/* GDMA_CREATE_DMA_REGION */
+struct gdma_create_dma_region_req {
+	struct gdma_req_hdr hdr;
+
+	/* The total size of the DMA region */
+	uint64_t length;
+
+	/* The offset in the first page */
+	uint32_t offset_in_page;
+
+	/* enum gdma_page_type */
+	uint32_t gdma_page_type;
+
+	/* The total number of pages */
+	uint32_t page_count;
+
+	/* If page_addr_list_len is smaller than page_count,
+	 * the remaining page addresses will be added via the
+	 * message GDMA_DMA_REGION_ADD_PAGES.
+	 */
+	uint32_t page_addr_list_len;
+	uint64_t page_addr_list[];
+}; /* HW DATA */
+
+struct gdma_create_dma_region_resp {
+	struct gdma_resp_hdr hdr;
+	uint64_t gdma_region;
+}; /* HW DATA */
+
+/* GDMA_DMA_REGION_ADD_PAGES */
+struct gdma_dma_region_add_pages_req {
+	struct gdma_req_hdr hdr;
+
+	uint64_t gdma_region;
+
+	uint32_t page_addr_list_len;
+	uint32_t reserved3;
+
+	uint64_t page_addr_list[];
+}; /* HW DATA */
+
+/* GDMA_DESTROY_DMA_REGION */
+struct gdma_destroy_dma_region_req {
+	struct gdma_req_hdr hdr;
+
+	uint64_t gdma_region;
+}; /* HW DATA */
+
+int mana_gd_verify_vf_version(device_t dev);
+
+int mana_gd_register_device(struct gdma_dev *gd);
+int mana_gd_deregister_device(struct gdma_dev *gd);
+
+int mana_gd_post_work_request(struct gdma_queue *wq,
+    const struct gdma_wqe_request *wqe_req,
+    struct gdma_posted_wqe_info *wqe_info);
+
+int mana_gd_post_and_ring(struct gdma_queue *queue,
+    const struct gdma_wqe_request *wqe,
+    struct gdma_posted_wqe_info *wqe_info);
+
 int mana_gd_alloc_res_map(uint32_t res_avil, struct gdma_resource *r,
     const char *name);
 void mana_gd_free_res_map(struct gdma_resource *r);
+
+void mana_gd_wq_ring_doorbell(struct gdma_context *gc,
+    struct gdma_queue *queue);
+
+int mana_gd_alloc_memory(struct gdma_context *gc, unsigned int length,
+    struct gdma_mem_info *gmi);
+
+void mana_gd_free_memory(struct gdma_mem_info *gmi);
+
+int mana_gd_send_request(struct gdma_context *gc, uint32_t req_len, const void *req,
+    uint32_t resp_len, void *resp);
 #endif /* _GDMA_H */

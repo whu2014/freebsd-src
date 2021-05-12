@@ -43,4 +43,10 @@ struct shm_channel {
 
 void mana_smc_init(struct shm_channel *sc, device_t dev, void __iomem *base);
 
+int mana_smc_setup_hwc(struct shm_channel *sc, bool reset_vf,
+    uint64_t eq_addr, uint64_t cq_addr, uint64_t rq_addr, uint64_t sq_addr,
+    uint32_t eq_msix_index);
+
+int mana_smc_teardown_hwc(struct shm_channel *sc, bool reset_vf);
+
 #endif /* _SHM_CHANNEL_H */

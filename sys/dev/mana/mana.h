@@ -37,6 +37,7 @@
 #include <sys/types.h>
 
 #include "gdma.h"
+#include "hw_channel.h"
 
 
 /* Microsoft Azure Network Adapter (MANA)'s definitions
