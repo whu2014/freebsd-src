@@ -234,10 +234,12 @@ enum gdma_page_type {
 #define GDMA_INVALID_DMA_REGION		0
 
 struct gdma_mem_info {
-	device_t		 dev;
+	device_t		dev;
 
-	vm_paddr_t		dma_handle;
-	void			*virt_addr;
+	bus_dma_tag_t		dma_tag;
+	bus_dmamap_t		dma_map;
+	bus_addr_t		dma_handle;	/* Physical address	*/
+	void			*virt_addr;	/* Virtual address	*/
 	uint64_t		length;
 
 	/* Allocated by the PF driver */
@@ -413,6 +415,10 @@ struct gdma_context {
 	struct gdma_resource	msix_resource;
 	struct gdma_irq_context	*irq_contexts;
 
+	/* This maps a CQ index to the queue structure. */
+	unsigned int		max_num_cqs;
+	struct gdma_queue	**cq_table;
+
 	/* Protect eq_test_event and test_event_eq_id  */
 	struct mtx		eq_test_event_mutex;
 	struct completion	eq_test_event;
@@ -427,6 +433,12 @@ struct gdma_context {
 
 	/* Shared memory chanenl (used to bootstrap HWC) */
 	struct shm_channel	shm_channel;
+
+	/* Hardware communication channel (HWC) */
+	struct gdma_dev		hwc;
+
+	/* Azure network adapter */
+	struct gdma_dev		mana;
 };
 
 #define MAX_NUM_GDMA_DEVICES	4
@@ -714,7 +726,7 @@ int mana_gd_post_and_ring(struct gdma_queue *queue,
     struct gdma_posted_wqe_info *wqe_info);
 
 int mana_gd_alloc_res_map(uint32_t res_avil, struct gdma_resource *r,
-    const char *name);
+    const char *lock_name);
 void mana_gd_free_res_map(struct gdma_resource *r);
 
 void mana_gd_wq_ring_doorbell(struct gdma_context *gc,
@@ -725,6 +737,15 @@ int mana_gd_alloc_memory(struct gdma_context *gc, unsigned int length,
 
 void mana_gd_free_memory(struct gdma_mem_info *gmi);
 
+void mana_gd_dma_map_paddr(void *arg, bus_dma_segment_t *segs,
+    int nseg, int error);
+
 int mana_gd_send_request(struct gdma_context *gc, uint32_t req_len, const void *req,
     uint32_t resp_len, void *resp);
+
+static inline int
+ilog2(long x)
+{
+	return (flsl(x) - 1);
+}
 #endif /* _GDMA_H */

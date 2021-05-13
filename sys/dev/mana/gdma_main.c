@@ -123,6 +123,280 @@ mana_gd_r64(struct gdma_context *g, uint64_t offset)
 	return (v);
 }
 
+void
+mana_gd_dma_map_paddr(void *arg, bus_dma_segment_t *segs, int nseg, int error)
+{
+	bus_addr_t *paddr = arg;
+
+	if (error)
+		return;
+
+	KASSERT(nseg == 1, ("too many segments %d!", nseg));
+	*paddr = segs->ds_addr;
+}
+
+int
+mana_gd_alloc_memory(struct gdma_context *gc, unsigned int length,
+    struct gdma_mem_info *gmi)
+{
+	dma_addr_t dma_handle;
+	void *buf;
+	int err;
+
+	if (!gc || !gmi)
+		return EINVAL;
+
+	if (length < PAGE_SIZE || (length != roundup_pow_of_two(length)))
+		return EINVAL;
+
+	err = bus_dma_tag_create(bus_get_dma_tag(gc->dev),	/* parent */
+	    PAGE_SIZE, 0,		/* alignment, boundary	*/
+	    BUS_SPACE_MAXADDR,		/* lowaddr		*/
+	    BUS_SPACE_MAXADDR,		/* highaddr		*/
+	    NULL, NULL,			/* filter, filterarg	*/
+	    length,			/* maxsize		*/
+	    1,				/* nsegments		*/
+	    length,			/* maxsegsize		*/
+	    0,				/* flags		*/
+	    NULL, NULL,			/* lockfunc, lockfuncarg*/
+	    &gmi->dma_tag);
+	if (err) {
+		device_printf(gc->dev,
+		    "failed to create dma tag, err: %d\n", err);
+		return (err);
+	}
+
+	err = bus_dmamem_alloc(gmi->dma_tag, &buf,
+	    BUS_DMA_NOWAIT | BUS_DMA_COHERENT, &gmi->dma_map);
+	if (err) {
+		device_printf(gc->dev,
+		    "failed to alloc dma mem, err: %d\n", err);
+		bus_dma_tag_destroy(gmi->dma_tag);
+		return (err);
+	}
+
+	err = bus_dmamap_load(gmi->dma_tag, gmi->dma_map, buf,
+	    length, mana_gd_dma_map_paddr, &dma_handle, BUS_DMA_NOWAIT);
+	if (err) {
+		device_printf(gc->dev,
+		    "failed to load dma mem, err: %d\n", err);
+		bus_dmamem_free(gmi->dma_tag, buf, gmi->dma_map);
+		bus_dma_tag_destroy(gmi->dma_tag);
+		return (err);
+	}
+
+	gmi->dev = gc->dev;
+	gmi->dma_handle = dma_handle;
+	gmi->virt_addr = buf;
+	gmi->length = length;
+
+	return 0;
+}
+
+void
+mana_gd_free_memory(struct gdma_mem_info *gmi)
+{
+	bus_dmamap_unload(gmi->dma_tag, gmi->dma_map);
+	bus_dmamem_free(gmi->dma_tag, gmi->dma_handle, gmi->dma_map);
+	bus_dma_tag_destroy(gmi->dma_tag);
+}
+
+static int
+mana_gd_register_irq(struct gdma_queue *queue,
+    const struct gdma_queue_spec *spec)
+{
+	struct gdma_dev *gd = queue->gdma_dev;
+	bool is_mana = mana_gd_is_mana(gd);
+	struct gdma_irq_context *gic;
+	struct gdma_context *gc;
+	struct gdma_resource *r;
+	unsigned int msi_index;
+	unsigned long flags;
+	int err;
+
+	gc = gd->gdma_context;
+	r = &gc->msix_resource;
+
+	mtx_lock_spin(&r->lock_spin);
+
+	msi_index = find_first_zero_bit(r->map, r->size);
+	if (msi_index >= r->size) {
+		err = -ENOSPC;
+	} else {
+		bitmap_set(r->map, msi_index, 1);
+		queue->eq.msix_index = msi_index;
+		err = 0;
+	}
+
+	mtx_unlock_spin(&r->lock_spin);
+
+	if (err)
+		return err;
+
+	WARN_ON(msi_index >= gc->num_msix_usable);
+
+	gic = &gc->irq_contexts[msi_index];
+
+	if (is_mana) {
+		netif_napi_add(spec->eq.ndev, &queue->eq.napi, mana_poll,
+			       NAPI_POLL_WEIGHT);
+		napi_enable(&queue->eq.napi);
+	}
+
+	WARN_ON(gic->handler || gic->arg);
+
+	gic->arg = queue;
+
+	if (is_mana)
+		gic->handler = mana_gd_schedule_napi;
+	else
+		gic->handler = mana_gd_process_eq_events;
+
+	return 0;
+}
+
+static void mana_gd_destroy_eq(struct gdma_context *gc, bool flush_evenets,
+			       struct gdma_queue *queue)
+{
+	int err;
+
+	if (flush_evenets) {
+		err = mana_gd_test_eq(gc, queue);
+		if (err)
+			dev_warn(gc->dev, "Failed to flush EQ: %d\n", err);
+	}
+
+	mana_gd_deregiser_irq(queue);
+
+	if (mana_gd_is_mana(queue->gdma_dev)) {
+#if 0 /*XXX */
+		napi_disable(&queue->eq.napi);
+		netif_napi_del(&queue->eq.napi);
+#endif
+	}
+
+	if (queue->eq.disable_needed)
+		mana_gd_disable_queue(queue);
+}
+
+static int mana_gd_create_eq(struct gdma_dev *gd,
+    const struct gdma_queue_spec *spec,
+    bool create_hwq, struct gdma_queue *queue)
+{
+	struct gdma_context *gc = gd->gdma_context;
+	device_t dev = gc->dev;
+	u32 log2_num_entries;
+	int err;
+
+	queue->eq.msix_index = INVALID_PCI_MSIX_INDEX;
+
+	log2_num_entries = ilog2(queue->queue_size / GDMA_EQE_SIZE);
+
+	if (spec->eq.log2_throttle_limit > log2_num_entries) {
+		device_printf(dev,
+		    "EQ throttling limit (%lu) > maximum EQE (%u)\n",
+		    spec->eq.log2_throttle_limit, log2_num_entries);
+		return EINVAL;
+	}
+
+	err = mana_gd_register_irq(queue, spec);
+	if (err) {
+		device_printf(dev, "Failed to register irq: %d\n", err);
+		return err;
+	}
+
+	queue->eq.callback = spec->eq.callback;
+	queue->eq.context = spec->eq.context;
+	queue->head |= INITIALIZED_OWNER_BIT(log2_num_entries);
+	queue->eq.log2_throttle_limit = spec->eq.log2_throttle_limit ?: 1;
+
+	if (create_hwq) {
+		err = mana_gd_create_hw_eq(gc, queue);
+		if (err)
+			goto out;
+
+		err = mana_gd_test_eq(gc, queue);
+		if (err)
+			goto out;
+	}
+
+	return 0;
+out:
+	device_printf(dev, "Failed to create EQ: %d\n", err);
+	mana_gd_destroy_eq(gc, false, queue);
+	return err;
+}
+
+static void
+mana_gd_create_cq(const struct gdma_queue_spec *spec,
+    struct gdma_queue *queue)
+{
+	uint32_t log2_num_entries = ilog2(spec->queue_size / GDMA_CQE_SIZE);
+
+	queue->head |= INITIALIZED_OWNER_BIT(log2_num_entries);
+	queue->cq.parent = spec->cq.parent_eq;
+	queue->cq.context = spec->cq.context;
+	queue->cq.callback = spec->cq.callback;
+}
+
+static void
+mana_gd_destroy_cq(struct gdma_context *gc,
+    struct gdma_queue *queue)
+{
+	uint32_t id = queue->id;
+
+	if (id >= gc->max_num_cqs)
+		return;
+
+	if (!gc->cq_table[id])
+		return;
+
+	gc->cq_table[id] = NULL;
+}
+
+int mana_gd_create_hwc_queue(struct gdma_dev *gd,
+    const struct gdma_queue_spec *spec,
+    struct gdma_queue **queue_ptr)
+{
+	struct gdma_context *gc = gd->gdma_context;
+	struct gdma_mem_info *gmi;
+	struct gdma_queue *queue;
+	int err;
+
+	queue = malloc(sizeof(*queue), M_DEVBUF, M_WAITOK | M_ZERO);
+	if (!queue)
+		return ENOMEM;
+
+	gmi = &queue->mem_info;
+	err = mana_gd_alloc_memory(gc, spec->queue_size, gmi);
+	if (err)
+		goto free_q;
+
+	queue->head = 0;
+	queue->tail = 0;
+	queue->queue_mem_ptr = gmi->virt_addr;
+	queue->queue_size = spec->queue_size;
+	queue->monitor_avl_buf = spec->monitor_avl_buf;
+	queue->type = spec->type;
+	queue->gdma_dev = gd;
+
+	if (spec->type == GDMA_EQ)
+		err = mana_gd_create_eq(gd, spec, false, queue);
+	else if (spec->type == GDMA_CQ)
+		mana_gd_create_cq(spec, queue);
+
+	if (err)
+		goto out;
+
+	*queue_ptr = queue;
+	return 0;
+out:
+	mana_gd_free_memory(gmi);
+free_q:
+	free(queue, M_DEVBUF);
+	return err;
+}
+
 /* XXX filter handler or intr handler? */
 static int
 mana_gd_intr(void *arg)
@@ -137,7 +411,7 @@ mana_gd_intr(void *arg)
 
 int
 mana_gd_alloc_res_map(uint32_t res_avail,
-    struct gdma_resource *r, const char *name)
+    struct gdma_resource *r, const char *lock_name)
 {
 	int n = howmany(res_avail , sizeof(unsigned long));
 
@@ -147,7 +421,7 @@ mana_gd_alloc_res_map(uint32_t res_avail,
 		return ENOMEM;
 
 	r->size = res_avail;
-	mtx_init(&r->lock_spin, name, NULL, MTX_SPIN);
+	mtx_init(&r->lock_spin, lock_name, NULL, MTX_SPIN);
 
 	return (0);
 }
@@ -403,6 +677,16 @@ mana_gd_remove_irqs(device_t dev)
 	pci_release_msi(dev);
 }
 
+static int
+mana_gd_setup_dma_tag(struct gdma_context *gc)
+{
+	int ret;
+
+	ret = bus_dma_tag_create(bus_get_dma_tag(gc->dev),
+	    1, 0,				/* alignment, bounds	*/
+
+}
+
 #else  /*whu*/
 #endif /*whu*/
 
@@ -504,6 +788,8 @@ mana_gd_attach(device_t dev)
 	rc = mana_gd_setup_irqs(dev);
 	if (rc)
 		goto err_free_pci_res;
+
+	}
 
 	mtx_init(&gc->eq_test_event_mutex,
 	    "gdma test event lock", NULL, MTX_DEF);
