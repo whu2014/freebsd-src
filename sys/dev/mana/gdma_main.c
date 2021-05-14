@@ -79,6 +79,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm.h>
 #include <vm/pmap.h>
 
+#include "gdma_util.h"
 #include "mana.h"
 
 /*********************************************************
@@ -121,6 +122,15 @@ mana_gd_r64(struct gdma_context *g, uint64_t offset)
 	    g->gd_bus.bar0_h, offset);
 	rmb();
 	return (v);
+}
+
+int
+mana_gd_send_request(struct gdma_context *gc, uint32_t req_len,
+    const void *req, uint32_t resp_len, void *resp)
+{
+	struct hw_channel_context *hwc = gc->hwc.driver_data;
+
+	return mana_hwc_send_request(hwc, req_len, req, resp_len, resp);
 }
 
 void
@@ -202,6 +212,72 @@ mana_gd_free_memory(struct gdma_mem_info *gmi)
 }
 
 static int
+mana_gd_create_hw_eq(struct gdma_context *gc,
+    struct gdma_queue *queue)
+{
+	struct gdma_create_queue_resp resp = {};
+	struct gdma_create_queue_req req = {};
+	int err;
+
+	if (queue->type != GDMA_EQ)
+		return EINVAL;
+
+	mana_gd_init_req_hdr(&req.hdr, GDMA_CREATE_QUEUE,
+			     sizeof(req), sizeof(resp));
+
+	req.hdr.dev_id = queue->gdma_dev->dev_id;
+	req.type = queue->type;
+	req.pdid = queue->gdma_dev->pdid;
+	req.doolbell_id = queue->gdma_dev->doorbell;
+	req.gdma_region = queue->mem_info.gdma_region;
+	req.queue_size = queue->queue_size;
+	req.log2_throttle_limit = queue->eq.log2_throttle_limit;
+	req.eq_pci_msix_index = queue->eq.msix_index;
+
+	err = mana_gd_send_request(gc, sizeof(req), &req, sizeof(resp), &resp);
+	if (err || resp.hdr.status) {
+		device_printf(gc->dev,
+		    "Failed to create queue: %d, 0x%x\n",
+		    err, resp.hdr.status);
+		return err ? err : EPROTO;
+	}
+
+	queue->id = resp.queue_index;
+	queue->eq.disable_needed = true;
+	queue->mem_info.gdma_region = GDMA_INVALID_DMA_REGION;
+	return 0;
+}
+
+static int mana_gd_disable_queue(struct gdma_queue *queue)
+{
+#if 0
+	struct gdma_context *gc = queue->gdma_dev->gdma_context;
+	struct gdma_disable_queue_req req = {};
+	struct gdma_general_resp resp = {};
+	int err;
+
+	WARN_ON(queue->type != GDMA_EQ);
+
+	mana_gd_init_req_hdr(&req.hdr, GDMA_DISABLE_QUEUE,
+			     sizeof(req), sizeof(resp));
+
+	req.hdr.dev_id = queue->gdma_dev->dev_id;
+	req.type = queue->type;
+	req.queue_index =  queue->id;
+	req.alloc_res_id_on_creation = 1;
+
+	err = mana_gd_send_request(gc, sizeof(req), &req, sizeof(resp), &resp);
+	if (err || resp.hdr.status) {
+		dev_err(gc->dev, "Failed to disable queue: %d, 0x%x\n", err,
+			resp.hdr.status);
+		return err ? err : -EPROTO;
+	}
+
+#endif
+	return 0;
+}
+
+static int
 mana_gd_register_irq(struct gdma_queue *queue,
     const struct gdma_queue_spec *spec)
 {
@@ -211,7 +287,6 @@ mana_gd_register_irq(struct gdma_queue *queue,
 	struct gdma_context *gc;
 	struct gdma_resource *r;
 	unsigned int msi_index;
-	unsigned long flags;
 	int err;
 
 	gc = gd->gdma_context;
@@ -221,7 +296,7 @@ mana_gd_register_irq(struct gdma_queue *queue,
 
 	msi_index = find_first_zero_bit(r->map, r->size);
 	if (msi_index >= r->size) {
-		err = -ENOSPC;
+		err = ENOSPC;
 	} else {
 		bitmap_set(r->map, msi_index, 1);
 		queue->eq.msix_index = msi_index;
@@ -233,30 +308,82 @@ mana_gd_register_irq(struct gdma_queue *queue,
 	if (err)
 		return err;
 
-	WARN_ON(msi_index >= gc->num_msix_usable);
+	if (unlikely(msi_index >= gc->num_msix_usable)) {
+		device_printf(gc->dev,
+		    "chose and invalid msix index %d, usable %d\n",
+		    msi_index, gc->num_msix_usable);
+		return ENOSPC;
+	}
 
 	gic = &gc->irq_contexts[msi_index];
 
 	if (is_mana) {
+#if 0
 		netif_napi_add(spec->eq.ndev, &queue->eq.napi, mana_poll,
 			       NAPI_POLL_WEIGHT);
 		napi_enable(&queue->eq.napi);
+#else
+		;
+#endif
 	}
 
-	WARN_ON(gic->handler || gic->arg);
+	if (unlikely(gic->handler || gic->arg)) {
+		device_printf(gc->dev,
+		    "interrupt handler or arg already assigned, "
+		    "msix index: %d\n", msi_index);
+	}
 
 	gic->arg = queue;
 
 	if (is_mana)
+#if 0
 		gic->handler = mana_gd_schedule_napi;
+#else
+		;
+#endif
 	else
 		gic->handler = mana_gd_process_eq_events;
+
+	mana_trc_dbg(NULL, "registered msix index %d vector %d irq %ju\n",
+	    msi_index, gic->msix_e.vector, rman_get_start(gic->res));
 
 	return 0;
 }
 
-static void mana_gd_destroy_eq(struct gdma_context *gc, bool flush_evenets,
-			       struct gdma_queue *queue)
+static void
+mana_gd_deregiser_irq(struct gdma_queue *queue)
+{
+	struct gdma_dev *gd = queue->gdma_dev;
+	struct gdma_irq_context *gic;
+	struct gdma_context *gc;
+	struct gdma_resource *r;
+	unsigned int msix_index;
+
+	gc = gd->gdma_context;
+	r = &gc->msix_resource;
+
+	/* At most num_online_cpus() + 1 interrupts are used. */
+	msix_index = queue->eq.msix_index;
+	if (unlikely(msix_index >= gc->num_msix_usable))
+		return;
+
+	gic = &gc->irq_contexts[msix_index];
+	gic->handler = NULL;
+	gic->arg = NULL;
+
+	mtx_lock_spin(&r->lock_spin);
+	bitmap_clear(r->map, msix_index, 1);
+	mtx_unlock_spin(&r->lock_spin);
+
+	queue->eq.msix_index = INVALID_PCI_MSIX_INDEX;
+
+	mana_trc_dbg(NULL, "deregistered msix index %d vector %d irq %ju\n",
+	    msi_index, gic->msix_e.vector, rman_get_start(gic->res));
+}
+
+static void
+mana_gd_destroy_eq(struct gdma_context *gc, bool flush_evenets,
+    struct gdma_queue *queue)
 {
 	int err;
 
@@ -285,7 +412,7 @@ static int mana_gd_create_eq(struct gdma_dev *gd,
 {
 	struct gdma_context *gc = gd->gdma_context;
 	device_t dev = gc->dev;
-	u32 log2_num_entries;
+	uint32_t log2_num_entries;
 	int err;
 
 	queue->eq.msix_index = INVALID_PCI_MSIX_INDEX;

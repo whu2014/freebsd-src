@@ -740,12 +740,6 @@ void mana_gd_free_memory(struct gdma_mem_info *gmi);
 void mana_gd_dma_map_paddr(void *arg, bus_dma_segment_t *segs,
     int nseg, int error);
 
-int mana_gd_send_request(struct gdma_context *gc, uint32_t req_len, const void *req,
-    uint32_t resp_len, void *resp);
-
-static inline int
-ilog2(long x)
-{
-	return (flsl(x) - 1);
-}
+int mana_gd_send_request(struct gdma_context *gc, uint32_t req_len,
+    const void *req, uint32_t resp_len, void *resp);
 #endif /* _GDMA_H */

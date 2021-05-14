@@ -32,9 +32,43 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/types.h>
 
+#include "gdma_util.h"
 #include "gdma.h"
 #include "hw_channel.h"
 
+static int
+mana_hwc_get_msg_index(struct hw_channel_context *hwc, uint16_t *msg_id)
+{
+	struct gdma_resource *r = &hwc->inflight_msg_res;
+	uint32_t index;
+
+	sema_wait(&hwc->sema);
+
+	mtx_lock_spin(&r->lock_spin);
+
+	index = find_first_zero_bit(hwc->inflight_msg_res.map,
+	    hwc->inflight_msg_res.size);
+
+	bitmap_set(hwc->inflight_msg_res.map, index, 1);
+
+	mtx_unlock_spin(&r->lock_spin);
+
+	*msg_id = index;
+
+	return 0;
+}
+
+static void
+mana_hwc_put_msg_index(struct hw_channel_context *hwc, uint16_t msg_id)
+{
+	struct gdma_resource *r = &hwc->inflight_msg_res;
+
+	mtx_lock_spin(&r->lock_spin);
+	bitmap_clear(hwc->inflight_msg_res.map, msg_id, 1);
+	mtx_unlock_spin(&r->lock_spin);
+
+	sema_post(&hwc->sema);
+}
 
 static int
 mana_hwc_create_gdma_cq(struct hw_channel_context *hwc,
@@ -135,6 +169,53 @@ mana_hwc_create_cq(struct hw_channel_context *hwc,
 	return 0;
 out:
 	mana_hwc_destroy_cq(hwc->gdma_dev->gdma_context, hwc_cq);
+	return err;
+}
+
+static int
+mana_hwc_post_tx_wqe(const struct hwc_wq *hwc_txq,
+    struct hwc_work_request *req,
+    uint32_t dest_virt_rq_id, uint32_t dest_virt_rcq_id,
+    bool dest_pf)
+{
+	device_t dev = hwc_txq->hwc->dev;
+	struct hwc_tx_oob *tx_oob;
+	struct gdma_sge *sge;
+	int err;
+
+	if (req->msg_size == 0 || req->msg_size > req->buf_len) {
+		device_printf(dev, "wrong msg_size: %u, buf_len: %u\n",
+		    req->msg_size, req->buf_len);
+		return EINVAL;
+	}
+
+	tx_oob = &req->tx_oob;
+
+	tx_oob->vrq_id = dest_virt_rq_id;
+	tx_oob->dest_vfid = 0;
+	tx_oob->vrcq_id = dest_virt_rcq_id;
+	tx_oob->vscq_id = hwc_txq->hwc_cq->gdma_cq->id;
+	tx_oob->loopback = false;
+	tx_oob->lso_override = false;
+	tx_oob->dest_pf = dest_pf;
+	tx_oob->vsq_id = hwc_txq->gdma_wq->id;
+
+	sge = &req->sge;
+	sge->address = (uint64_t)req->buf_sge_addr;
+	sge->mem_key = hwc_txq->msg_buf->gpa_mkey;
+	sge->size = req->msg_size;
+
+	memset(&req->wqe_req, 0, sizeof(struct gdma_wqe_request));
+	req->wqe_req.sgl = sge;
+	req->wqe_req.num_sge = 1;
+	req->wqe_req.inline_oob_size = sizeof(struct hwc_tx_oob);
+	req->wqe_req.inline_oob_data = tx_oob;
+	req->wqe_req.client_data_unit = 0;
+
+	err = mana_gd_post_and_ring(hwc_txq->gdma_wq, &req->wqe_req, NULL);
+	if (err)
+		device_printf(dev,
+		    "Failed to post WQE on HWC SQ: %d\n", err);
 	return err;
 }
 
@@ -267,4 +348,68 @@ mana_hwc_create_channel(struct gdma_context *gc)
 out:
 	free(hwc, M_DEVBUF);
 	return (err);
+}
+
+int
+mana_hwc_send_request(struct hw_channel_context *hwc, uint32_t req_len,
+    const void *req, uint32_t resp_len, void *resp)
+{
+	struct hwc_work_request *tx_wr;
+	struct hwc_wq *txq = hwc->txq;
+	struct gdma_req_hdr *req_msg;
+	struct hwc_caller_ctx *ctx;
+	uint16_t msg_id;
+	int err;
+
+	mana_hwc_get_msg_index(hwc, &msg_id);
+
+	tx_wr = &txq->msg_buf->reqs[msg_id];
+
+	if (req_len > tx_wr->buf_len) {
+		device_printf(hwc->dev,
+		    "HWC: req msg size: %d > %d\n", req_len,
+		    tx_wr->buf_len);
+		err = EINVAL;
+		goto out;
+	}
+
+	ctx = hwc->caller_ctx + msg_id;
+	ctx->output_buf = resp;
+	ctx->output_buflen = resp_len;
+
+	req_msg = (struct gdma_req_hdr *)tx_wr->buf_va;
+	if (req)
+		memcpy(req_msg, req, req_len);
+
+	req_msg->req.hwc_msg_id = msg_id;
+
+	tx_wr->msg_size = req_len;
+
+	err = mana_hwc_post_tx_wqe(txq, tx_wr, 0, 0, false);
+	if (err) {
+		device_printf(hwc->dev,
+		    "HWC: Failed to post send WQE: %d\n", err);
+		goto out;
+	}
+
+	if (!wait_for_completion_timeout(&ctx->comp_event, 30 * HZ)) {
+		device_printf(hwc->dev, "HWC: Request timed out!\n");
+		err = ETIMEDOUT;
+		goto out;
+	}
+
+	if (ctx->error) {
+		err = ctx->error;
+		goto out;
+	}
+
+	if (ctx->status_code) {
+		device_printf(hwc->dev,
+		    "HWC: Failed hw_channel req: 0x%x\n", ctx->status_code);
+		err = EPROTO;
+		goto out;
+	}
+out:
+	mana_hwc_put_msg_index(hwc, msg_id);
+	return err;
 }
