@@ -524,6 +524,183 @@ free_q:
 	return err;
 }
 
+uint32_t
+mana_gd_wq_avail_space(struct gdma_queue *wq)
+{
+	uint32_t used_space = (wq->head - wq->tail) * GDMA_WQE_BU_SIZE;
+	uint32_t wq_size = wq->queue_size;
+
+	// XXX WARN_ON_ONCE(used_space > wq_size);
+	if (used_space > wq_size) {
+		mana_trc_warn(NULL, "failed: used space %u > queue size %u\n",
+		    used_space, wq_size);
+	}
+
+	return wq_size - used_space;
+}
+
+uint8_t *
+mana_gd_get_wqe_ptr(const struct gdma_queue *wq, uint32_t wqe_offset)
+{
+	uint32_t offset =
+	    (wqe_offset * GDMA_WQE_BU_SIZE) & (wq->queue_size - 1);
+
+	// XXX WARN_ON_ONCE((offset + GDMA_WQE_BU_SIZE) > wq->queue_size);
+	if ((offset + GDMA_WQE_BU_SIZE) > wq->queue_size) {
+		mana_trc_warn(NULL, "failed: write end out of queue bound %u, "
+		    "queue size %u\n",
+		    offset + GDMA_WQE_BU_SIZE, wq->queue_size);
+	}
+
+	return wq->queue_mem_ptr + offset;
+}
+
+static uint32_t
+mana_gd_write_client_oob(const struct gdma_wqe_request *wqe_req,
+    enum gdma_queue_type q_type,
+    uint32_t client_oob_size, uint32_t sgl_data_size,
+    uint8_t *wqe_ptr)
+{
+	bool oob_in_sgl = !!(wqe_req->flags & GDMA_WR_OOB_IN_SGL);
+	bool pad_data = !!(wqe_req->flags & GDMA_WR_PAD_BY_SGE0);
+	struct gdma_wqe *header = (struct gdma_wqe *)wqe_ptr;
+	uint8_t *ptr;
+
+	memset(header, 0, sizeof(struct gdma_wqe));
+	header->num_sge = wqe_req->num_sge;
+	header->inline_oob_size_div4 = client_oob_size / sizeof(uint32_t);
+
+	if (oob_in_sgl) {
+		// XXX WARN_ON_ONCE(!pad_data || wqe_req->num_sge < 2);
+		if (!pad_data || wqe_req->num_sge < 2) {
+			mana_trc_warn(NULL, "no pad_data or num_sge < 1\n");
+		}
+
+		header->client_oob_in_sgl = 1;
+
+		if (pad_data)
+			header->last_vbytes = wqe_req->sgl[0].size;
+	}
+
+	if (q_type == GDMA_SQ)
+		header->client_data_unit = wqe_req->client_data_unit;
+
+	/* The size of gdma_wqe + client_oob_size must be less than or equal
+	 * to one Basic Unit (i.e. 32 bytes), so the pointer can't go beyond
+	 * the queue memory buffer boundary.
+	 */
+	ptr = wqe_ptr + sizeof(header);
+
+	if (wqe_req->inline_oob_data && wqe_req->inline_oob_size > 0) {
+		memcpy(ptr, wqe_req->inline_oob_data, wqe_req->inline_oob_size);
+
+		if (client_oob_size > wqe_req->inline_oob_size)
+			memset(ptr + wqe_req->inline_oob_size, 0,
+			       client_oob_size - wqe_req->inline_oob_size);
+	}
+
+	return sizeof(header) + client_oob_size;
+}
+
+static void
+mana_gd_write_sgl(struct gdma_queue *wq, uint8_t *wqe_ptr,
+    const struct gdma_wqe_request *wqe_req)
+{
+	uint32_t sgl_size = sizeof(struct gdma_sge) * wqe_req->num_sge;
+	const uint8_t *address = (uint8_t *)wqe_req->sgl;
+	uint8_t *base_ptr, *end_ptr;
+	uint32_t size_to_end;
+
+	base_ptr = wq->queue_mem_ptr;
+	end_ptr = base_ptr + wq->queue_size;
+	size_to_end = (uint32_t)(end_ptr - wqe_ptr);
+
+	if (size_to_end < sgl_size) {
+		memcpy(wqe_ptr, address, size_to_end);
+
+		wqe_ptr = base_ptr;
+		address += size_to_end;
+		sgl_size -= size_to_end;
+	}
+
+	memcpy(wqe_ptr, address, sgl_size);
+}
+
+int
+mana_gd_post_work_request(struct gdma_queue *wq,
+    const struct gdma_wqe_request *wqe_req,
+    struct gdma_posted_wqe_info *wqe_info)
+{
+	uint32_t client_oob_size = wqe_req->inline_oob_size;
+	struct gdma_context *gc;
+	uint32_t sgl_data_size;
+	uint32_t max_wqe_size;
+	uint32_t wqe_size;
+	uint8_t *wqe_ptr;
+
+	if (wqe_req->num_sge == 0)
+		return EINVAL;
+
+	if (wq->type == GDMA_RQ) {
+		if (client_oob_size != 0)
+			return EINVAL;
+
+		client_oob_size = INLINE_OOB_SMALL_SIZE;
+
+		max_wqe_size = GDMA_MAX_RQE_SIZE;
+	} else {
+		if (client_oob_size != INLINE_OOB_SMALL_SIZE &&
+		    client_oob_size != INLINE_OOB_LARGE_SIZE)
+			return EINVAL;
+
+		max_wqe_size = GDMA_MAX_SQE_SIZE;
+	}
+
+	sgl_data_size = sizeof(struct gdma_sge) * wqe_req->num_sge;
+	wqe_size = ALIGN(sizeof(struct gdma_wqe) + client_oob_size +
+	    sgl_data_size, GDMA_WQE_BU_SIZE);
+	if (wqe_size > max_wqe_size)
+		return EINVAL;
+
+	if (wq->monitor_avl_buf && wqe_size > mana_gd_wq_avail_space(wq)) {
+		gc = wq->gdma_dev->gdma_context;
+		device_printf(gc->dev, "unsuccessful flow control!\n");
+		return ENOSPC;
+	}
+
+	if (wqe_info)
+		wqe_info->wqe_size_in_bu = wqe_size / GDMA_WQE_BU_SIZE;
+
+	wqe_ptr = mana_gd_get_wqe_ptr(wq, wq->head);
+	wqe_ptr += mana_gd_write_client_oob(wqe_req, wq->type, client_oob_size,
+	    sgl_data_size, wqe_ptr);
+	if (wqe_ptr >= (uint8_t *)wq->queue_mem_ptr + wq->queue_size)
+		wqe_ptr -= wq->queue_size;
+
+	mana_gd_write_sgl(wq, wqe_ptr, wqe_req);
+
+	wq->head += wqe_size / GDMA_WQE_BU_SIZE;
+
+	return 0;
+}
+
+int
+mana_gd_post_and_ring(struct gdma_queue *queue,
+    const struct gdma_wqe_request *wqe_req,
+    struct gdma_posted_wqe_info *wqe_info)
+{
+	struct gdma_context *gc = queue->gdma_dev->gdma_context;
+	int err;
+
+	err = mana_gd_post_work_request(queue, wqe_req, wqe_info);
+	if (err)
+		return err;
+
+	mana_gd_wq_ring_doorbell(gc, queue);
+
+	return 0;
+}
+
 /* XXX filter handler or intr handler? */
 static int
 mana_gd_intr(void *arg)

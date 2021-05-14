@@ -47,6 +47,9 @@
 #define	BIT_MASK(nr)		(1UL << ((nr) & (BITS_PER_LONG - 1)))
 #define	BIT_WORD(nr)		((nr) / BITS_PER_LONG)
 
+#undef	ALIGN
+#define ALIGN(x, y)		roundup2((x), (y))
+
 static inline void
 bitmap_set(unsigned long *map, unsigned int start, int nr)
 {
