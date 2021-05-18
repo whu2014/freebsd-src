@@ -248,18 +248,20 @@ mana_gd_create_hw_eq(struct gdma_context *gc,
 	return 0;
 }
 
-static int mana_gd_disable_queue(struct gdma_queue *queue)
+static
+int mana_gd_disable_queue(struct gdma_queue *queue)
 {
-#if 0
 	struct gdma_context *gc = queue->gdma_dev->gdma_context;
 	struct gdma_disable_queue_req req = {};
 	struct gdma_general_resp resp = {};
 	int err;
 
-	WARN_ON(queue->type != GDMA_EQ);
+	// XXX WARN_ON(queue->type != GDMA_EQ);
+	mana_trc_warn(NULL, "Not event queue type 0x%x\n",
+	    queue->type);
 
 	mana_gd_init_req_hdr(&req.hdr, GDMA_DISABLE_QUEUE,
-			     sizeof(req), sizeof(resp));
+	    sizeof(req), sizeof(resp));
 
 	req.hdr.dev_id = queue->gdma_dev->dev_id;
 	req.type = queue->type;
@@ -268,12 +270,12 @@ static int mana_gd_disable_queue(struct gdma_queue *queue)
 
 	err = mana_gd_send_request(gc, sizeof(req), &req, sizeof(resp), &resp);
 	if (err || resp.hdr.status) {
-		dev_err(gc->dev, "Failed to disable queue: %d, 0x%x\n", err,
-			resp.hdr.status);
-		return err ? err : -EPROTO;
+		device_printf(gc->dev,
+		    "Failed to disable queue: %d, 0x%x\n", err,
+		    resp.hdr.status);
+		return err ? err : EPROTO;
 	}
 
-#endif
 	return 0;
 }
 
@@ -445,6 +447,59 @@ mana_gd_deregiser_irq(struct gdma_queue *queue)
 	    msi_index, gic->msix_e.vector, rman_get_start(gic->res));
 }
 
+int
+mana_gd_test_eq(struct gdma_context *gc, struct gdma_queue *eq)
+{
+	struct gdma_generate_test_event_req req = {};
+	struct gdma_general_resp resp = {};
+	device_t dev = gc->dev;
+	int err;
+
+	mtx_lock(&gc->eq_test_event_mutex);
+
+	init_completion(&gc->eq_test_event);
+	gc->test_event_eq_id = INVALID_QUEUE_ID;
+
+	mana_gd_init_req_hdr(&req.hdr, GDMA_GENERATE_TEST_EQE,
+			     sizeof(req), sizeof(resp));
+
+	req.hdr.dev_id = eq->gdma_dev->dev_id;
+	req.queue_index = eq->id;
+
+	err = mana_gd_send_request(gc, sizeof(req), &req,
+	    sizeof(resp), &resp);
+	if (err) {
+		device_printf(dev, "test_eq failed: %d\n", err);
+		goto out;
+	}
+
+	err = EPROTO;
+
+	if (resp.hdr.status) {
+		device_printf(dev, "test_eq failed: 0x%x\n",
+		    resp.hdr.status);
+		goto out;
+	}
+
+	if (!wait_for_completion_timeout(&gc->eq_test_event, 30 * hz)) {
+		device_printf(dev, "test_eq timed out on queue %d\n",
+		    eq->id);
+		goto out;
+	}
+
+	if (eq->id != gc->test_event_eq_id) {
+		device_printf(dev,
+		    "test_eq got an event on wrong queue %d (%d)\n",
+		    gc->test_event_eq_id, eq->id);
+		goto out;
+	}
+
+	err = 0;
+out:
+	mtx_unlock(&gc->eq_test_event_mutex);
+	return err;
+}
+
 static void
 mana_gd_destroy_eq(struct gdma_context *gc, bool flush_evenets,
     struct gdma_queue *queue)
@@ -454,7 +509,8 @@ mana_gd_destroy_eq(struct gdma_context *gc, bool flush_evenets,
 	if (flush_evenets) {
 		err = mana_gd_test_eq(gc, queue);
 		if (err)
-			dev_warn(gc->dev, "Failed to flush EQ: %d\n", err);
+			device_printf(gc->dev,
+			    "Failed to flush EQ: %d\n", err);
 	}
 
 	mana_gd_deregiser_irq(queue);
