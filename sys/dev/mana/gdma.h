@@ -37,18 +37,12 @@
 #include <sys/bus.h>
 #include <sys/types.h>
 
+#include "gdma_util.h"
 #include "shm_channel.h"
 
 /* Structures labeled with "HW DATA" are exchanged with the hardware. All of
  * them are naturally aligned and hence don't need __packed.
  */
-
-#define BIT(n)			(1ULL << (n))
-
-struct completion {
-	unsigned int done;
-	struct mtx lock;
-};
 
 #define GDMA_BAR0		0
 
@@ -485,7 +479,7 @@ struct gdma_wqe {
 
 		struct {
 			uint32_t num_sge		:8;
-			uint32_t inline_oob_size_div4:3;
+			uint32_t inline_oob_size_div4	:3;
 			uint32_t client_oob_in_sgl	:1;
 			uint32_t reserved1		:4;
 			uint32_t client_data_unit	:14;

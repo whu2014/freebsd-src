@@ -32,7 +32,6 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/types.h>
 
-#include "gdma_util.h"
 #include "gdma.h"
 #include "hw_channel.h"
 
@@ -392,7 +391,7 @@ mana_hwc_send_request(struct hw_channel_context *hwc, uint32_t req_len,
 		goto out;
 	}
 
-	if (!wait_for_completion_timeout(&ctx->comp_event, 30 * HZ)) {
+	if (!wait_for_completion_timeout(&ctx->comp_event, 30 * hz)) {
 		device_printf(hwc->dev, "HWC: Request timed out!\n");
 		err = ETIMEDOUT;
 		goto out;

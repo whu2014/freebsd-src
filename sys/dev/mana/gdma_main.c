@@ -277,6 +277,70 @@ static int mana_gd_disable_queue(struct gdma_queue *queue)
 	return 0;
 }
 
+#define DOORBELL_OFFSET_SQ	0x0
+#define DOORBELL_OFFSET_RQ	0x400
+#define DOORBELL_OFFSET_CQ	0x800
+#define DOORBELL_OFFSET_EQ	0xFF8
+
+static void
+mana_gd_ring_doorbell(struct gdma_context *gc, uint32_t db_index,
+    enum gdma_queue_type q_type, uint32_t qid,
+    uint32_t tail_ptr, uint8_t num_req)
+{
+	void __iomem *addr = gc->db_page_base + gc->db_page_size * db_index;
+	union gdma_doorbell_entry e = {};
+
+	switch (q_type) {
+	case GDMA_EQ:
+		e.eq.id = qid;
+		e.eq.tail_ptr = tail_ptr;
+		e.eq.arm = num_req;
+
+		addr += DOORBELL_OFFSET_EQ;
+		break;
+
+	case GDMA_CQ:
+		e.cq.id = qid;
+		e.cq.tail_ptr = tail_ptr;
+		e.cq.arm = num_req;
+
+		addr += DOORBELL_OFFSET_CQ;
+		break;
+
+	case GDMA_RQ:
+		e.rq.id = qid;
+		e.rq.tail_ptr = tail_ptr;
+		e.rq.wqe_cnt = num_req;
+
+		addr += DOORBELL_OFFSET_RQ;
+		break;
+
+	case GDMA_SQ:
+		e.sq.id = qid;
+		e.sq.tail_ptr = tail_ptr;
+
+		addr += DOORBELL_OFFSET_SQ;
+		break;
+
+	default:
+		// XXX WARN_ON(1);
+		mana_trc_warn(NULL, "Invalid queue type 0x%x\n", q_type);
+		return;
+	}
+
+	/* Ensure all writes are done before ring doorbell */
+	wmb();
+
+	writeq(e.as_uint64, addr);
+}
+
+void
+mana_gd_wq_ring_doorbell(struct gdma_context *gc, struct gdma_queue *queue)
+{
+	mana_gd_ring_doorbell(gc, queue->gdma_dev->doorbell, queue->type,
+	    queue->id, queue->head * GDMA_WQE_BU_SIZE, 1);
+}
+
 static int
 mana_gd_register_irq(struct gdma_queue *queue,
     const struct gdma_queue_spec *spec)
@@ -573,7 +637,7 @@ mana_gd_write_client_oob(const struct gdma_wqe_request *wqe_req,
 	if (oob_in_sgl) {
 		// XXX WARN_ON_ONCE(!pad_data || wqe_req->num_sge < 2);
 		if (!pad_data || wqe_req->num_sge < 2) {
-			mana_trc_warn(NULL, "no pad_data or num_sge < 1\n");
+			mana_trc_warn(NULL, "no pad_data or num_sge < 2\n");
 		}
 
 		header->client_oob_in_sgl = 1;

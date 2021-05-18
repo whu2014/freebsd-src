@@ -4,6 +4,7 @@
 
 KMOD	= if_mana
 SRCS	= gdma_main.c mana_sysctl.c shm_channel.c
+SRCS	+= gdma_util.c hw_channel.c
 SRCS	+= device_if.h bus_if.h pci_if.h
 
 CFLAGS  += -I${SRCTOP}/sys/dev/mana

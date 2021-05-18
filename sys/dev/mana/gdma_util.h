@@ -50,6 +50,8 @@
 #undef	ALIGN
 #define ALIGN(x, y)		roundup2((x), (y))
 
+#define BIT(n)			(1ULL << (n))
+
 static inline void
 bitmap_set(unsigned long *map, unsigned int start, int nr)
 {
@@ -124,4 +126,14 @@ roundup_pow_of_two(unsigned long x)
 	return (1UL << flsl(x - 1));
 }
 
+struct completion {
+	unsigned int done;
+	struct mtx lock;
+};
+
+void init_completion(struct completion *c);
+void free_completion(struct completion *c);
+void complete(struct completion *c);
+void wait_for_completion(struct completion *c);
+int wait_for_completion_timeout(struct completion *c, int timeout);
 #endif /* _GDMA_UTIL_H_ */
