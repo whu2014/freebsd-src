@@ -343,6 +343,139 @@ mana_gd_wq_ring_doorbell(struct gdma_context *gc, struct gdma_queue *queue)
 	    queue->id, queue->head * GDMA_WQE_BU_SIZE, 1);
 }
 
+void
+mana_gd_arm_cq(struct gdma_queue *cq)
+{
+	struct gdma_context *gc = cq->gdma_dev->gdma_context;
+
+	uint32_t num_cqe = cq->queue_size / GDMA_CQE_SIZE;
+
+	uint32_t head = cq->head % (num_cqe << GDMA_CQE_OWNER_BITS);
+
+	mana_gd_ring_doorbell(gc, cq->gdma_dev->doorbell, cq->type, cq->id,
+	    head, SET_ARM_BIT);
+}
+
+static void
+mana_gd_process_eqe(struct gdma_queue *eq)
+{
+	uint32_t head = eq->head % (eq->queue_size / GDMA_EQE_SIZE);
+	struct gdma_context *gc = eq->gdma_dev->gdma_context;
+	struct gdma_eqe *eq_eqe_ptr = eq->queue_mem_ptr;
+	union gdma_eqe_info eqe_info;
+	enum gdma_eqe_type type;
+	struct gdma_event event;
+	struct gdma_queue *cq;
+	struct gdma_eqe *eqe;
+	uint32_t cq_id;
+
+	eqe = &eq_eqe_ptr[head];
+	eqe_info.as_uint32 = eqe->eqe_info;
+	type = eqe_info.type;
+
+	switch (type) {
+	case GDMA_EQE_COMPLETION:
+		cq_id = eqe->details[0] & 0xFFFFFF;
+		// XXX if (WARN_ON_ONCE(cq_id >= gc->max_num_cqs))
+		if (cq_id >= gc->max_num_cqs) {
+			mana_trc_warn(NULL,
+			    "failed: cq_id %u > max_num_cqs %u\n",
+			    cq_id, gc->max_num_cqs);
+			break;
+		}
+
+		cq = gc->cq_table[cq_id];
+		// XXX if (WARN_ON_ONCE(!cq || cq->type != GDMA_CQ || cq->id != cq_id))
+		if (!cq || cq->type != GDMA_CQ || cq->id != cq_id) {
+			mana_trc_warn(NULL,
+			    "failed: invalid cq_id %u\n", cq_id);
+			break;
+		}
+
+		if (cq->cq.callback)
+			cq->cq.callback(cq->cq.context, cq);
+
+		break;
+
+	case GDMA_EQE_TEST_EVENT:
+		gc->test_event_eq_id = eq->id;
+		complete(&gc->eq_test_event);
+		break;
+
+	case GDMA_EQE_HWC_INIT_EQ_ID_DB:
+	case GDMA_EQE_HWC_INIT_DATA:
+	case GDMA_EQE_HWC_INIT_DONE:
+		if (!eq->eq.callback)
+			break;
+
+		event.type = type;
+		memcpy(&event.details, &eqe->details, GDMA_EVENT_DATA_SIZE);
+		eq->eq.callback(eq->eq.context, eq, &event);
+		break;
+
+	default:
+		break;
+	}
+}
+
+static void
+mana_gd_process_eq_events(void *arg)
+{
+	uint32_t owner_bits, new_bits, old_bits;
+	union gdma_eqe_info eqe_info;
+	struct gdma_eqe *eq_eqe_ptr;
+	struct gdma_queue *eq = arg;
+	struct gdma_context *gc;
+	struct gdma_eqe *eqe;
+	unsigned int arm_bit;
+	uint32_t head, num_eqe;
+	int i;
+
+	gc = eq->gdma_dev->gdma_context;
+
+	num_eqe = eq->queue_size / GDMA_EQE_SIZE;
+	eq_eqe_ptr = eq->queue_mem_ptr;
+
+	/* Process up to 5 EQEs at a time, and update the HW head. */
+	for (i = 0; i < 5; i++) {
+		eqe = &eq_eqe_ptr[eq->head % num_eqe];
+		eqe_info.as_uint32 = eqe->eqe_info;
+		owner_bits = eqe_info.owner_bits;
+
+		old_bits = (eq->head / num_eqe - 1) & GDMA_EQE_OWNER_MASK;
+		/* No more entries */
+		if (owner_bits == old_bits)
+			break;
+
+		new_bits = (eq->head / num_eqe) & GDMA_EQE_OWNER_MASK;
+		if (owner_bits != new_bits) {
+			device_printf(gc->dev,
+			    "EQ %d: overflow detected\n", eq->id);
+			break;
+		}
+
+		mana_gd_process_eqe(eq);
+
+		eq->head++;
+	}
+
+	/* Always rearm the EQ for HWC. */
+	/* XXX For MANA, rearm it when NAPI is done. */
+	if (mana_gd_is_hwc(eq->gdma_dev)) {
+		arm_bit = SET_ARM_BIT;
+	} else if (eq->eq.work_done < eq->eq.budget /* XXX &&
+	    napi_complete_done(&eq->eq.napi, eq->eq.work_done) */) {
+		arm_bit = SET_ARM_BIT;
+	} else {
+		arm_bit = 0;
+	}
+
+	head = eq->head % (num_eqe << GDMA_EQE_OWNER_BITS);
+
+	mana_gd_ring_doorbell(gc, eq->gdma_dev->doorbell, eq->type, eq->id,
+	    head, arm_bit);
+}
+
 static int
 mana_gd_register_irq(struct gdma_queue *queue,
     const struct gdma_queue_spec *spec)
@@ -644,6 +777,60 @@ free_q:
 	return err;
 }
 
+static void
+mana_gd_destroy_dma_region(struct gdma_context *gc, uint64_t gdma_region)
+{
+	struct gdma_destroy_dma_region_req req = {};
+	struct gdma_general_resp resp = {};
+	int err;
+
+	if (gdma_region == GDMA_INVALID_DMA_REGION)
+		return;
+
+	mana_gd_init_req_hdr(&req.hdr, GDMA_DESTROY_DMA_REGION, sizeof(req),
+	    sizeof(resp));
+	req.gdma_region = gdma_region;
+
+	err = mana_gd_send_request(gc, sizeof(req), &req, sizeof(resp),
+	    &resp);
+	if (err || resp.hdr.status)
+		device_printf(gc->dev,
+		    "Failed to destroy DMA region: %d, 0x%x\n",
+		    err, resp.hdr.status);
+}
+
+void
+mana_gd_destroy_queue(struct gdma_context *gc, struct gdma_queue *queue)
+{
+	struct gdma_mem_info *gmi = &queue->mem_info;
+
+	switch (queue->type) {
+	case GDMA_EQ:
+		mana_gd_destroy_eq(gc, queue->eq.disable_needed, queue);
+		break;
+
+	case GDMA_CQ:
+		mana_gd_destroy_cq(gc, queue);
+		break;
+
+	case GDMA_RQ:
+		break;
+
+	case GDMA_SQ:
+		break;
+
+	default:
+		device_printf(gc->dev,
+		    "Can't destroy unknown queue: type = %d\n",
+		    queue->type);
+		return;
+	}
+
+	mana_gd_destroy_dma_region(gc, gmi->gdma_region);
+	mana_gd_free_memory(gmi);
+	free(queue, M_DEVBUF);
+}
+
 uint32_t
 mana_gd_wq_avail_space(struct gdma_queue *wq)
 {
@@ -819,6 +1006,57 @@ mana_gd_post_and_ring(struct gdma_queue *queue,
 	mana_gd_wq_ring_doorbell(gc, queue);
 
 	return 0;
+}
+
+static int
+mana_gd_read_cqe(struct gdma_queue *cq, struct gdma_comp *comp)
+{
+	unsigned int num_cqe = cq->queue_size / sizeof(struct gdma_cqe);
+	struct gdma_cqe *cq_cqe = cq->queue_mem_ptr;
+	uint32_t owner_bits, new_bits, old_bits;
+	struct gdma_cqe *cqe;
+
+	cqe = &cq_cqe[cq->head % num_cqe];
+	owner_bits = cqe->cqe_info.owner_bits;
+
+	old_bits = (cq->head / num_cqe - 1) & GDMA_CQE_OWNER_MASK;
+	/* Return 0 if no more entries. */
+	if (owner_bits == old_bits)
+		return 0;
+
+	new_bits = (cq->head / num_cqe) & GDMA_CQE_OWNER_MASK;
+	/* Return -1 if overflow detected. */
+	if (owner_bits != new_bits)
+		return -1;
+
+	comp->wq_num = cqe->cqe_info.wq_num;
+	comp->is_sq = cqe->cqe_info.is_sq;
+	memcpy(comp->cqe_data, cqe->cqe_data, GDMA_COMP_DATA_SIZE);
+
+	return 1;
+}
+
+int
+mana_gd_poll_cq(struct gdma_queue *cq, struct gdma_comp *comp, int num_cqe)
+{
+	int cqe_idx;
+	int ret;
+
+	for (cqe_idx = 0; cqe_idx < num_cqe; cqe_idx++) {
+		ret = mana_gd_read_cqe(cq, &comp[cqe_idx]);
+
+		if (ret < 0) {
+			cq->head -= cqe_idx;
+			return ret;
+		}
+
+		if (ret == 0)
+			break;
+
+		cq->head++;
+	}
+
+	return cqe_idx;
 }
 
 /* XXX filter handler or intr handler? */

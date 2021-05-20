@@ -52,6 +52,9 @@
 
 #define BIT(n)			(1ULL << (n))
 
+#define test_bit(i, a)							\
+    ((((volatile const unsigned long *)(a))[BIT_WORD(i)]) & BIT_MASK(i))
+
 static inline void
 bitmap_set(unsigned long *map, unsigned int start, int nr)
 {
