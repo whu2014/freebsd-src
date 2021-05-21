@@ -30,8 +30,10 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#include <sys/param.h>
 #include <sys/types.h>
 #include <sys/systm.h>
+#include <sys/bus.h>
 
 #include "shm_channel.h"
 #include "gdma_util.h"
@@ -96,7 +98,7 @@ union smc_proto_hdr {
 static int
 mana_smc_poll_register(void __iomem *base, bool reset)
 {
-	void __iomem *ptr = base + SMC_LAST_DWORD * SMC_BASIC_UNIT;
+	void __iomem *ptr = (uint8_t *)base + SMC_LAST_DWORD * SMC_BASIC_UNIT;
 	volatile uint32_t last_dword;
 	int i;
 
@@ -134,7 +136,8 @@ mana_smc_read_response(struct shm_channel *sc, uint32_t msg_type,
 	if (err)
 		return err;
 
-	hdr.as_uint32 = readl(base + SMC_LAST_DWORD * SMC_BASIC_UNIT);
+	hdr.as_uint32 =
+	    readl((uint8_t *)base + SMC_LAST_DWORD * SMC_BASIC_UNIT);
 
 	if (reset_vf && hdr.as_uint32 == SHMEM_VF_RESET_STATE)
 		return 0;
@@ -271,7 +274,7 @@ mana_smc_setup_hwc(struct shm_channel *sc, bool reset_vf, uint64_t eq_addr,
 	 */
 	dword = (uint32_t *)shm_buf;
 	for (i = 0; i < SMC_APERTURE_DWORDS; i++)
-		writel(sc->base + i * SMC_BASIC_UNIT, *dword++);
+		writel((char *)sc->base + i * SMC_BASIC_UNIT, *dword++);
 
 	/* Read shmem response (polling for VF possession) and validate.
 	 * For setup, waiting for response on shared memory is not strictly
@@ -280,7 +283,8 @@ mana_smc_setup_hwc(struct shm_channel *sc, bool reset_vf, uint64_t eq_addr,
 	err = mana_smc_read_response(sc, SMC_MSG_TYPE_ESTABLISH_HWC,
 	    SMC_MSG_TYPE_ESTABLISH_HWC_VERSION, reset_vf);
 	if (err) {
-		dev_err(sc->dev, "Error when setting up HWC: %d\n", err);
+		device_printf(sc->dev,
+		    "Error when setting up HWC: %d\n", err);
 		return err;
 	}
 
@@ -309,7 +313,8 @@ mana_smc_teardown_hwc(struct shm_channel *sc, bool reset_vf)
 	/* Write message in high 32 bits of 256-bit shared memory, causing HW
 	 * to set possession bit to PF.
 	 */
-	writel(sc->base + SMC_LAST_DWORD * SMC_BASIC_UNIT, hdr.as_uint32);
+	writel((char *)sc->base + SMC_LAST_DWORD * SMC_BASIC_UNIT,
+	    hdr.as_uint32);
 
 	/* Read shmem response (polling for VF possession) and validate.
 	 * For teardown, waiting for response is required to ensure hardware

@@ -143,7 +143,7 @@ mana_gd_query_max_resources(device_t dev)
 		return err ? err : EPROTO;
 	}
 
-	mana_trc_dbg(NULL, "max_msix %u, max_eq %u, max_cq, "
+	mana_trc_dbg(NULL, "max_msix %u, max_eq %u, max_cq %u, "
 	    "max_sq %u, max_rq %u\n",
 	    resp.max_msix, resp.max_eq, resp.max_cq,
 	    resp.max_sq, resp.max_rq);
@@ -242,7 +242,7 @@ int
 mana_gd_alloc_memory(struct gdma_context *gc, unsigned int length,
     struct gdma_mem_info *gmi)
 {
-	dma_addr_t dma_handle;
+	bus_addr_t dma_handle;
 	void *buf;
 	int err;
 
@@ -300,7 +300,7 @@ void
 mana_gd_free_memory(struct gdma_mem_info *gmi)
 {
 	bus_dmamap_unload(gmi->dma_tag, gmi->dma_map);
-	bus_dmamem_free(gmi->dma_tag, gmi->dma_handle, gmi->dma_map);
+	bus_dmamem_free(gmi->dma_tag, gmi->virt_addr, gmi->dma_map);
 	bus_dma_tag_destroy(gmi->dma_tag);
 }
 
@@ -382,16 +382,17 @@ mana_gd_ring_doorbell(struct gdma_context *gc, uint32_t db_index,
     enum gdma_queue_type q_type, uint32_t qid,
     uint32_t tail_ptr, uint8_t num_req)
 {
-	void __iomem *addr = gc->db_page_base + gc->db_page_size * db_index;
+	void __iomem *addr;
 	union gdma_doorbell_entry e = {};
 
+	addr = (char *)gc->db_page_base + gc->db_page_size * db_index;
 	switch (q_type) {
 	case GDMA_EQ:
 		e.eq.id = qid;
 		e.eq.tail_ptr = tail_ptr;
 		e.eq.arm = num_req;
 
-		addr += DOORBELL_OFFSET_EQ;
+		addr = (char *)addr + DOORBELL_OFFSET_EQ;
 		break;
 
 	case GDMA_CQ:
@@ -399,7 +400,7 @@ mana_gd_ring_doorbell(struct gdma_context *gc, uint32_t db_index,
 		e.cq.tail_ptr = tail_ptr;
 		e.cq.arm = num_req;
 
-		addr += DOORBELL_OFFSET_CQ;
+		addr = (char *)addr + DOORBELL_OFFSET_CQ;
 		break;
 
 	case GDMA_RQ:
@@ -407,14 +408,14 @@ mana_gd_ring_doorbell(struct gdma_context *gc, uint32_t db_index,
 		e.rq.tail_ptr = tail_ptr;
 		e.rq.wqe_cnt = num_req;
 
-		addr += DOORBELL_OFFSET_RQ;
+		addr = (char *)addr + DOORBELL_OFFSET_RQ;
 		break;
 
 	case GDMA_SQ:
 		e.sq.id = qid;
 		e.sq.tail_ptr = tail_ptr;
 
-		addr += DOORBELL_OFFSET_SQ;
+		addr = (char *)addr + DOORBELL_OFFSET_SQ;
 		break;
 
 	default:
@@ -426,7 +427,7 @@ mana_gd_ring_doorbell(struct gdma_context *gc, uint32_t db_index,
 	/* Ensure all writes are done before ring doorbell */
 	wmb();
 
-	writeq(e.as_uint64, addr);
+	writeq(addr, e.as_uint64);
 }
 
 void
@@ -670,7 +671,7 @@ mana_gd_deregiser_irq(struct gdma_queue *queue)
 	queue->eq.msix_index = INVALID_PCI_MSIX_INDEX;
 
 	mana_trc_dbg(NULL, "deregistered msix index %d vector %d irq %ju\n",
-	    msi_index, gic->msix_e.vector, rman_get_start(gic->res));
+	    msix_index, gic->msix_e.vector, rman_get_start(gic->res));
 }
 
 int
@@ -977,7 +978,7 @@ mana_gd_get_wqe_ptr(const struct gdma_queue *wq, uint32_t wqe_offset)
 		    offset + GDMA_WQE_BU_SIZE, wq->queue_size);
 	}
 
-	return wq->queue_mem_ptr + offset;
+	return (uint8_t *)wq->queue_mem_ptr + offset;
 }
 
 static uint32_t
@@ -1457,16 +1458,6 @@ mana_gd_remove_irqs(device_t dev)
 	pci_release_msi(dev);
 }
 
-static int
-mana_gd_setup_dma_tag(struct gdma_context *gc)
-{
-	int ret;
-
-	ret = bus_dma_tag_create(bus_get_dma_tag(gc->dev),
-	    1, 0,				/* alignment, bounds	*/
-
-}
-
 #else  /*whu*/
 #endif /*whu*/
 
@@ -1566,9 +1557,8 @@ mana_gd_attach(device_t dev)
 	mana_smc_init(&gc->shm_channel, gc->dev, gc->shm_base);
 
 	rc = mana_gd_setup_irqs(dev);
-	if (rc)
+	if (rc) {
 		goto err_free_pci_res;
-
 	}
 
 	mtx_init(&gc->eq_test_event_mutex,

@@ -35,6 +35,7 @@
 #define _MANA_H
 
 #include <sys/types.h>
+#include <sys/proc.h>
 
 #include "gdma.h"
 #include "hw_channel.h"

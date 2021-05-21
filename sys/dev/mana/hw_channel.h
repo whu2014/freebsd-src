@@ -192,7 +192,7 @@ struct hwc_caller_ctx {
 
 struct hw_channel_context {
 	struct gdma_dev *gdma_dev;
-	device_t *dev;
+	device_t dev;
 
 	uint16_t num_inflight_msg;
 	uint32_t max_req_msg_size;

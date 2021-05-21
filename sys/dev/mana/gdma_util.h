@@ -37,9 +37,7 @@
 #include <sys/types.h>
 #include <sys/param.h>
 
-#ifndef
 #define BITS_PER_LONG			(sizeof(long) * NBBY)
-#endif
 
 #define BITMAP_FIRST_WORD_MASK(start)	(~0UL << ((start) % BITS_PER_LONG))
 #define BITMAP_LAST_WORD_MASK(n)	(~0UL >> (BITS_PER_LONG - (n)))
@@ -112,7 +110,7 @@ find_first_zero_bit(const unsigned long *p, unsigned long max)
 {
 	unsigned long i, n;
 
-	for (i = 0, i < max / BITS_PER_LONG; i++) {
+	for (i = 0; i < max / BITS_PER_LONG; i++) {
 		n = ~p[i];
 		if (n != 0)
 			return (i * BITS_PER_LONG + ffsl(n) -1);

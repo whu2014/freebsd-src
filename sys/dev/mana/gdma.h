@@ -35,7 +35,9 @@
 #define _GDMA_H
 
 #include <sys/bus.h>
+#include <sys/bus_dma.h>
 #include <sys/types.h>
+#include <sys/limits.h>
 
 #include "gdma_util.h"
 #include "shm_channel.h"
@@ -340,9 +342,9 @@ struct gdma_queue {
 #if 0 /*XXX */
 			/* NAPI data */
 			struct napi_struct napi;
+#endif
 			int			work_done;
 			int			budget;
-#endif
 		} eq;
 
 		struct {
@@ -390,7 +392,7 @@ struct mana_eq {
 struct gdma_irq_context {
 	struct gdma_msix_entry	msix_e;
 	struct resource		*res;
-	driver_filter_t		*handler;
+	driver_intr_t		*handler;
 	void			*arg;
 	void			*cookie;
 	bool			requested;
@@ -404,6 +406,7 @@ struct gdma_context {
 	struct gdma_bus		gd_bus;
 
 	/* Per-vPort max number of queues */
+	unsigned int		max_num_queues;
 	unsigned int		max_num_msix;
 	unsigned int		num_msix_usable;
 	struct gdma_resource	msix_resource;

@@ -30,9 +30,15 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#include <sys/param.h>
+#include <sys/systm.h>
 #include <sys/types.h>
+#include <sys/kernel.h>
+#include <sys/kthread.h>
+#include <sys/malloc.h>
+#include <sys/mutex.h>
 
-#include "gdma.h"
+#include "mana.h"
 #include "hw_channel.h"
 
 static int
@@ -221,7 +227,7 @@ mana_hwc_rx_event_handler(void *ctx, uint32_t gdma_rxq_id,
 	struct gdma_sge *sge;
 	uint64_t rq_base_addr;
 	uint64_t rx_req_idx;
-	uint8 *wqe;
+	uint8_t *wqe;
 
 	// XXX if (WARN_ON_ONCE(hwc_rxq->gdma_wq->id != gdma_rxq_id))
 	if (hwc_rxq->gdma_wq->id != gdma_rxq_id) {
@@ -267,9 +273,10 @@ mana_hwc_tx_event_handler(void *ctx, uint32_t gdma_txq_id,
 	struct hwc_wq *hwc_txq = hwc->txq;
 
 	// XXX WARN_ON_ONCE(!hwc_txq || hwc_txq->gdma_wq->id != gdma_txq_id);
-	if (!hwc_txq || hwc_txq->gdma_wq->id != gdma_txq_id);
+	if (!hwc_txq || hwc_txq->gdma_wq->id != gdma_txq_id) {
 		mana_trc_warn(NULL, "unmatched tx queue %u != %u\n",
-		    hwc_rxq->gdma_wq->id, gdma_rxq_id);
+		    hwc_txq->gdma_wq->id, gdma_txq_id);
+	}
 }
 
 static int
@@ -462,7 +469,7 @@ mana_hwc_alloc_dma_buf(struct hw_channel_context *hwc, uint16_t q_depth,
 
 	dma_buf->num_reqs = q_depth;
 
-	buf_size = PAGE_ALIGN(q_depth * max_msg_size);
+	buf_size = ALIGN(q_depth * max_msg_size, PAGE_SIZE);
 
 	gmi = &dma_buf->mem_info;
 	err = mana_gd_alloc_memory(gc, buf_size, gmi);
@@ -478,7 +485,7 @@ mana_hwc_alloc_dma_buf(struct hw_channel_context *hwc, uint16_t q_depth,
 	for (i = 0; i < q_depth; i++) {
 		hwc_wr = &dma_buf->reqs[i];
 
-		hwc_wr->buf_va = virt_addr + i * max_msg_size;
+		hwc_wr->buf_va = (char *)virt_addr + i * max_msg_size;
 		hwc_wr->buf_sge_addr = base_pa + i * max_msg_size;
 
 		hwc_wr->buf_len = max_msg_size;
@@ -530,7 +537,7 @@ mana_hwc_create_wq(struct hw_channel_context *hwc,
 	uint32_t queue_size;
 	int err;
 
-	if (q_type != GDMA_SQ && q_type != GDMA_RQ); {
+	if (q_type != GDMA_SQ && q_type != GDMA_RQ) {
 		// XXX should fail and return error?
 		mana_trc_warn(NULL, "Invalid q_type %u\n", q_type);
 	}
