@@ -49,8 +49,14 @@
 
 #undef	ALIGN
 #define ALIGN(x, y)		roundup2((x), (y))
+#define IS_ALIGNED(x, a)	(((x) & ((__typeof(x))(a) - 1)) == 0)
 
 #define BIT(n)			(1ULL << (n))
+
+#define PHYS_PFN(x)		((unsigned long)((x) >> PAGE_SHIFT))
+
+#define min_t(type, _x, _y)						\
+    ((type)(_x) < (type)(_y) ? (type)(_x) : (type)(_y))
 
 #define test_bit(i, a)							\
     ((((volatile const unsigned long *)(a))[BIT_WORD(i)]) & BIT_MASK(i))

@@ -124,6 +124,99 @@ mana_gd_r64(struct gdma_context *g, uint64_t offset)
 	return (v);
 }
 
+static int
+mana_gd_query_max_resources(device_t dev)
+{
+	struct gdma_context *gc = device_get_softc(dev);
+	struct gdma_query_max_resources_resp resp = {};
+	struct gdma_general_req req = {};
+	int err;
+
+	mana_gd_init_req_hdr(&req.hdr, GDMA_QUERY_MAX_RESOURCES,
+	    sizeof(req), sizeof(resp));
+
+	err = mana_gd_send_request(gc, sizeof(req), &req, sizeof(resp), &resp);
+	if (err || resp.hdr.status) {
+		device_printf(gc->dev,
+		   "Failed to query resource info: %d, 0x%x\n",
+		   err, resp.hdr.status);
+		return err ? err : EPROTO;
+	}
+
+	mana_trc_dbg(NULL, "max_msix %u, max_eq %u, max_cq, "
+	    "max_sq %u, max_rq %u\n",
+	    resp.max_msix, resp.max_eq, resp.max_cq,
+	    resp.max_sq, resp.max_rq);
+
+	if (gc->num_msix_usable > resp.max_msix)
+		gc->num_msix_usable = resp.max_msix;
+
+	if (gc->num_msix_usable <= 1)
+		return ENOSPC;
+
+	gc->max_num_queues = mp_ncpus;
+	if (gc->max_num_queues > MANA_MAX_NUM_QUEUES)
+		gc->max_num_queues = MANA_MAX_NUM_QUEUES;
+
+	if (gc->max_num_queues > resp.max_eq)
+		gc->max_num_queues = resp.max_eq;
+
+	if (gc->max_num_queues > resp.max_cq)
+		gc->max_num_queues = resp.max_cq;
+
+	if (gc->max_num_queues > resp.max_sq)
+		gc->max_num_queues = resp.max_sq;
+
+	if (gc->max_num_queues > resp.max_rq)
+		gc->max_num_queues = resp.max_rq;
+
+	return 0;
+}
+
+static int
+mana_gd_detect_devices(device_t dev)
+{
+	struct gdma_context *gc = device_get_softc(dev);
+	struct gdma_list_devices_resp resp = {};
+	struct gdma_general_req req = {};
+	struct gdma_dev_id gd_dev;
+	uint32_t i, max_num_devs;
+	uint16_t dev_type;
+	int err;
+
+	mana_gd_init_req_hdr(&req.hdr, GDMA_LIST_DEVICES, sizeof(req),
+	    sizeof(resp));
+
+	err = mana_gd_send_request(gc, sizeof(req), &req, sizeof(resp), &resp);
+	if (err || resp.hdr.status) {
+		device_printf(gc->dev,
+		    "Failed to detect devices: %d, 0x%x\n", err,
+		    resp.hdr.status);
+		return err ? err : EPROTO;
+	}
+
+	max_num_devs = min_t(uint32_t, MAX_NUM_GDMA_DEVICES, resp.num_of_devs);
+
+	for (i = 0; i < max_num_devs; i++) {
+		gd_dev = resp.devs[i];
+		dev_type = gd_dev.type;
+
+		mana_trc_dbg(NULL, "gdma dev %d, type %u\n",
+		    i, dev_type);
+
+		/* HWC is already detected in mana_hwc_create_channel(). */
+		if (dev_type == GDMA_DEVICE_HWC)
+			continue;
+
+		if (dev_type == GDMA_DEVICE_MANA) {
+			gc->mana.gdma_context = gc;
+			gc->mana.dev_id = gd_dev;
+		}
+	}
+
+	return gc->mana.dev_id.type == 0 ? ENODEV : 0;
+}
+
 int
 mana_gd_send_request(struct gdma_context *gc, uint32_t req_len,
     const void *req, uint32_t resp_len, void *resp)
@@ -831,6 +924,31 @@ mana_gd_destroy_queue(struct gdma_context *gc, struct gdma_queue *queue)
 	free(queue, M_DEVBUF);
 }
 
+int
+mana_gd_verify_vf_version(device_t dev)
+{
+	struct gdma_context *gc = device_get_softc(dev);
+	struct gdma_verify_ver_resp resp = {};
+	struct gdma_verify_ver_req req = {};
+	int err;
+
+	mana_gd_init_req_hdr(&req.hdr, GDMA_VERIFY_VF_DRIVER_VERSION,
+	    sizeof(req), sizeof(resp));
+
+	req.protocol_ver_min = GDMA_PROTOCOL_FIRST;
+	req.protocol_ver_max = GDMA_PROTOCOL_LAST;
+
+	err = mana_gd_send_request(gc, sizeof(req), &req, sizeof(resp), &resp);
+	if (err || resp.hdr.status) {
+		device_printf(gc->dev,
+		    "VfVerifyVersionOutput: %d, status=0x%x\n",
+		    err, resp.hdr.status);
+		return err ? err : EPROTO;
+	}
+
+	return 0;
+}
+
 uint32_t
 mana_gd_wq_avail_space(struct gdma_queue *wq)
 {
@@ -1456,15 +1574,46 @@ mana_gd_attach(device_t dev)
 	mtx_init(&gc->eq_test_event_mutex,
 	    "gdma test event lock", NULL, MTX_DEF);
 
-#if 0
 	rc = mana_hwc_create_channel(gc);
-	if (rc)
+	if (rc) {
+		mana_trc_dbg(NULL, "Failed to create hwc channel\n");
 		goto err_remove_irq;
+	}
+
+	rc = mana_gd_verify_vf_version(dev);
+	if (rc) {
+		mana_trc_dbg(NULL, "Failed to verify vf\n");
+		goto err_remove_irq;
+	}
+
+	rc = mana_gd_query_max_resources(dev);
+	if (rc) {
+		mana_trc_dbg(NULL, "Failed to query max resources\n");
+		goto err_remove_irq;
+	}
+
+	rc = mana_gd_detect_devices(dev);
+	if (rc) {
+		mana_trc_dbg(NULL, "Failed to detect  mana device\n");
+		goto err_remove_irq;
+	}
+
+	mana_trc_dbg(NULL, "So far so good\n");
+
+#if 0
+	rc = mana_probe(&gc->mana);
+	if (rc) {
+		mana_trc_dbg(NULL, "Failed to probe mana device\n");
+	}
 #endif
 
 	return (0);
 
-// err_remove_irq:
+//err_clean_up_gdma:
+	mana_hwc_destroy_channel(gc);
+	free(gc->cq_table, M_DEVBUF);
+	gc->cq_table = NULL;
+err_remove_irq:
 	mana_gd_remove_irqs(dev);
 err_free_pci_res:
 	mana_gd_free_pci_res(gc);
@@ -1487,6 +1636,12 @@ mana_gd_detach(device_t dev)
 #if 1
 	struct gdma_context *gc = device_get_softc(dev);
 	mana_trc_dbg(NULL, "mana_gd_detach called\n");
+
+	mana_hwc_destroy_channel(gc);
+	free(gc->cq_table, M_DEVBUF);
+	gc->cq_table = NULL;
+
+	mana_gd_remove_irqs(dev);
 
 	mana_gd_free_pci_res(gc);
 

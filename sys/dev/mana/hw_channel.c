@@ -633,6 +633,85 @@ mana_hwc_init_inflight_msg(struct hw_channel_context *hwc, uint16_t num_msg)
 }
 
 static int
+mana_hwc_test_channel(struct hw_channel_context *hwc, uint16_t q_depth,
+    uint32_t max_req_msg_size, uint32_t max_resp_msg_size)
+{
+	struct gdma_context *gc = hwc->gdma_dev->gdma_context;
+	struct hwc_wq *hwc_rxq = hwc->rxq;
+	struct hwc_work_request *req;
+	struct hwc_caller_ctx *ctx;
+	int err;
+	int i;
+
+	/* Post all WQEs on the RQ */
+	for (i = 0; i < q_depth; i++) {
+		req = &hwc_rxq->msg_buf->reqs[i];
+		err = mana_hwc_post_rx_wqe(hwc_rxq, req);
+		if (err)
+			return err;
+	}
+
+	ctx = malloc(q_depth * sizeof(struct hwc_caller_ctx),
+	    M_DEVBUF, M_WAITOK | M_ZERO);
+	if (!ctx)
+		return ENOMEM;
+
+	for (i = 0; i < q_depth; ++i)
+		init_completion(&ctx[i].comp_event);
+
+	hwc->caller_ctx = ctx;
+
+	return mana_gd_test_eq(gc, hwc->cq->gdma_eq);
+}
+
+static int
+mana_hwc_establish_channel(struct gdma_context *gc, uint16_t *q_depth,
+    uint32_t *max_req_msg_size,
+    uint32_t *max_resp_msg_size)
+{
+	struct hw_channel_context *hwc = gc->hwc.driver_data;
+	struct gdma_queue *rq = hwc->rxq->gdma_wq;
+	struct gdma_queue *sq = hwc->txq->gdma_wq;
+	struct gdma_queue *eq = hwc->cq->gdma_eq;
+	struct gdma_queue *cq = hwc->cq->gdma_cq;
+	int err;
+
+	init_completion(&hwc->hwc_init_eqe_comp);
+
+	err = mana_smc_setup_hwc(&gc->shm_channel, false,
+	    eq->mem_info.dma_handle,
+	    cq->mem_info.dma_handle,
+	    rq->mem_info.dma_handle,
+	    sq->mem_info.dma_handle,
+	    eq->eq.msix_index);
+	if (err)
+		return err;
+
+	if (!wait_for_completion_timeout(&hwc->hwc_init_eqe_comp, 60 * hz))
+		return ETIMEDOUT;
+
+	*q_depth = hwc->hwc_init_q_depth_max;
+	*max_req_msg_size = hwc->hwc_init_max_req_msg_size;
+	*max_resp_msg_size = hwc->hwc_init_max_resp_msg_size;
+
+	// XXX if (WARN_ON(cq->id >= gc->max_num_cqs))
+	if (cq->id >= gc->max_num_cqs) {
+		mana_trc_warn(NULL, "invalid cq id %u > %u\n",
+		    cq->id, gc->max_num_cqs);
+		return EPROTO;
+	}
+
+	gc->cq_table = malloc(gc->max_num_cqs * sizeof(struct gdma_queue *),
+	    M_DEVBUF, M_WAITOK | M_ZERO);
+	if (!gc->cq_table)
+		return ENOMEM;
+
+	gc->cq_table[cq->id] = cq;
+
+	return 0;
+}
+
+static int
 mana_hwc_init_queues(struct hw_channel_context *hwc, uint16_t q_depth,
     uint32_t max_req_msg_size, uint32_t max_resp_msg_size)
 {
@@ -727,15 +806,15 @@ mana_hwc_create_channel(struct gdma_context *gc)
 	}
 
 	err = mana_hwc_establish_channel(gc, &q_depth_max, &max_req_msg_size,
-					 &max_resp_msg_size);
+	    &max_resp_msg_size);
 	if (err) {
 		device_printf(hwc->dev, "Failed to establish HWC: %d\n", err);
 		goto out;
 	}
 
 	err = mana_hwc_test_channel(gc->hwc.driver_data,
-				    HW_CHANNEL_VF_BOOTSTRAP_QUEUE_DEPTH,
-				    max_req_msg_size, max_resp_msg_size);
+	    HW_CHANNEL_VF_BOOTSTRAP_QUEUE_DEPTH,
+	    max_req_msg_size, max_resp_msg_size);
 	if (err) {
 		device_printf(hwc->dev, "Failed to test HWC: %d\n", err);
 		goto out;
@@ -745,6 +824,41 @@ mana_hwc_create_channel(struct gdma_context *gc)
 out:
 	free(hwc, M_DEVBUF);
 	return (err);
+}
+
+void
+mana_hwc_destroy_channel(struct gdma_context *gc)
+{
+	struct hw_channel_context *hwc = gc->hwc.driver_data;
+	struct hwc_caller_ctx *ctx;
+
+	mana_smc_teardown_hwc(&gc->shm_channel, false);
+
+	ctx = hwc->caller_ctx;
+	free(ctx, M_DEVBUF);
+	hwc->caller_ctx = NULL;
+
+	mana_hwc_destroy_wq(hwc, hwc->txq);
+	hwc->txq = NULL;
+
+	mana_hwc_destroy_wq(hwc, hwc->rxq);
+	hwc->rxq = NULL;
+
+	mana_hwc_destroy_cq(hwc->gdma_dev->gdma_context, hwc->cq);
+	hwc->cq = NULL;
+
+	mana_gd_free_res_map(&hwc->inflight_msg_res);
+
+	hwc->num_inflight_msg = 0;
+
+	if (hwc->gdma_dev->pdid != INVALID_PDID) {
+		hwc->gdma_dev->doorbell = INVALID_DOORBELL;
+		hwc->gdma_dev->pdid = INVALID_PDID;
+	}
+
+	free(hwc, M_DEVBUF);
+	gc->hwc.driver_data = NULL;
+	gc->hwc.gdma_context = NULL;
 }
 
 int
