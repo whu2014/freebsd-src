@@ -212,6 +212,13 @@ mana_hwc_init_event_handler(void *ctx, struct gdma_queue *q_self,
 		/* Ignore unknown events, which should never happen. */
 		break;
 	}
+
+#if 1 /*XXX */
+	mana_trc_dbg(NULL, "hwc got event type %u\n", event->type);
+	if (event->type == GDMA_EQE_HWC_INIT_DATA)
+		mana_trc_dbg(NULL, "hwc init event type %u, value %u\n",
+		    type, val);
+#endif
 }
 
 static void
@@ -681,7 +688,10 @@ mana_hwc_establish_channel(struct gdma_context *gc, uint16_t *q_depth,
 	struct gdma_queue *sq = hwc->txq->gdma_wq;
 	struct gdma_queue *eq = hwc->cq->gdma_eq;
 	struct gdma_queue *cq = hwc->cq->gdma_cq;
+	// struct gdma_irq_context *gic;
 	int err;
+
+	// gic = &gc->irq_contexts[eq->eq.msix_index];
 
 	init_completion(&hwc->hwc_init_eqe_comp);
 
@@ -694,7 +704,7 @@ mana_hwc_establish_channel(struct gdma_context *gc, uint16_t *q_depth,
 	if (err)
 		return err;
 
-	if (!wait_for_completion_timeout(&hwc->hwc_init_eqe_comp, 60 * hz))
+	if (wait_for_completion_timeout(&hwc->hwc_init_eqe_comp, 60 * hz))
 		return ETIMEDOUT;
 
 	*q_depth = hwc->hwc_init_q_depth_max;
@@ -910,7 +920,7 @@ mana_hwc_send_request(struct hw_channel_context *hwc, uint32_t req_len,
 		goto out;
 	}
 
-	if (!wait_for_completion_timeout(&ctx->comp_event, 30 * hz)) {
+	if (wait_for_completion_timeout(&ctx->comp_event, 30 * hz)) {
 		device_printf(hwc->dev, "HWC: Request timed out!\n");
 		err = ETIMEDOUT;
 		goto out;

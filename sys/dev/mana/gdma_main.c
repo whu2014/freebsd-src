@@ -314,10 +314,13 @@ mana_gd_create_hw_eq(struct gdma_context *gc,
 {
 	struct gdma_create_queue_resp resp = {};
 	struct gdma_create_queue_req req = {};
+	// struct gdma_irq_context *gic;
 	int err;
 
 	if (queue->type != GDMA_EQ)
 		return EINVAL;
+
+	// gic = &gc->irq_contexts[queue->eq.msix_index];
 
 	mana_gd_init_req_hdr(&req.hdr, GDMA_CREATE_QUEUE,
 			     sizeof(req), sizeof(resp));
@@ -592,10 +595,16 @@ mana_gd_register_irq(struct gdma_queue *queue,
 	mtx_lock_spin(&r->lock_spin);
 
 	msi_index = find_first_zero_bit(r->map, r->size);
+#if 1 /*XXX*/
+	unsigned long *l = r->map;
+	mana_trc_dbg(NULL, "allocate msi_index %u, r->map[0] = %lu\n",
+	    msi_index, *l);
+#endif
 	if (msi_index >= r->size) {
 		err = ENOSPC;
 	} else {
 		bitmap_set(r->map, msi_index, 1);
+		mana_trc_dbg(NULL, "r->map[0] = %lu now\n", *l);
 		queue->eq.msix_index = msi_index;
 		err = 0;
 	}
@@ -712,7 +721,7 @@ mana_gd_test_eq(struct gdma_context *gc, struct gdma_queue *eq)
 		goto out;
 	}
 
-	if (!wait_for_completion_timeout(&gc->eq_test_event, 30 * hz)) {
+	if (wait_for_completion_timeout(&gc->eq_test_event, 30 * hz)) {
 		device_printf(dev, "test_eq timed out on queue %d\n",
 		    eq->id);
 		goto out;
@@ -1189,8 +1198,15 @@ mana_gd_intr(void *arg)
 {
 	struct gdma_irq_context *gic = arg;
 
-	if (gic->handler)
+	if (gic->handler) {
+		mana_trc_dbg(NULL,
+		    "!!! got gdma interrupt\n");
+
 		gic->handler(gic->arg);
+	} else {
+		mana_trc_dbg(NULL,
+		    "??? strayed interrupt\n");
+	}
 }
 #else
 static int
@@ -1209,7 +1225,8 @@ int
 mana_gd_alloc_res_map(uint32_t res_avail,
     struct gdma_resource *r, const char *lock_name)
 {
-	int n = howmany(res_avail , sizeof(unsigned long));
+	// int n = howmany(res_avail , sizeof(unsigned long));
+	int n = howmany(res_avail, BITS_PER_LONG);
 
 	r->map =
 	    malloc(n * sizeof(unsigned long), M_DEVBUF, M_WAITOK | M_ZERO);
@@ -1219,6 +1236,9 @@ mana_gd_alloc_res_map(uint32_t res_avail,
 	r->size = res_avail;
 	mtx_init(&r->lock_spin, lock_name, NULL, MTX_SPIN);
 
+	mana_trc_dbg(NULL,
+	    "total res %u, total number of unsigned longs %u\n",
+	    r->size, n);
 	return (0);
 }
 

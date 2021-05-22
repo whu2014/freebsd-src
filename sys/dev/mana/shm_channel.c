@@ -35,6 +35,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/bus.h>
 
+#include "mana.h"
 #include "shm_channel.h"
 #include "gdma_util.h"
 
@@ -138,6 +139,7 @@ mana_smc_read_response(struct shm_channel *sc, uint32_t msg_type,
 
 	hdr.as_uint32 =
 	    readl((uint8_t *)base + SMC_LAST_DWORD * SMC_BASIC_UNIT);
+	mana_trc_dbg(NULL, "shm response 0x%x\n", hdr.as_uint32);
 
 	if (reset_vf && hdr.as_uint32 == SHMEM_VF_RESET_STATE)
 		return 0;
@@ -200,6 +202,10 @@ mana_smc_setup_hwc(struct shm_channel *sc, bool reset_vf, uint64_t eq_addr,
 
 	if ((eq_msix_index & VECTOR_MASK) != eq_msix_index)
 		return EINVAL;
+
+	mana_trc_dbg(NULL, "eq_addr 0x%lx, cq_addr 0x%lx, "
+	    "rq_addr 0x%lx, sq_addr 0x%lx, eq msix index 0x%x\n",
+	    eq_addr, cq_addr, rq_addr, sq_addr, eq_msix_index);
 
 	/* Scheme for packing four addresses and extra info into 256 bits.
 	 *
@@ -273,8 +279,11 @@ mana_smc_setup_hwc(struct shm_channel *sc, bool reset_vf, uint64_t eq_addr,
 	 * triggers HW to set possession bit to PF).
 	 */
 	dword = (uint32_t *)shm_buf;
-	for (i = 0; i < SMC_APERTURE_DWORDS; i++)
+	for (i = 0; i < SMC_APERTURE_DWORDS; i++) {
+		mana_trc_dbg(NULL, "write shm_buf %d, val: 0x%x\n",
+		    i, *dword);
 		writel((char *)sc->base + i * SMC_BASIC_UNIT, *dword++);
+	}
 
 	/* Read shmem response (polling for VF possession) and validate.
 	 * For setup, waiting for response on shared memory is not strictly
