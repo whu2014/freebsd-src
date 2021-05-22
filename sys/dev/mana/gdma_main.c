@@ -93,7 +93,11 @@ static void	mana_gd_init_registers(struct gdma_context *);
 static void	mana_gd_free_pci_res(struct gdma_context *);
 static inline uint32_t mana_gd_r32(struct gdma_context *, uint64_t);
 static inline uint64_t mana_gd_r64(struct gdma_context *, uint64_t);
+#if 1
+static void	 mana_gd_intr(void *);
+#else
 static int	 mana_gd_intr(void *);
+#endif
 static int	 mana_gd_setup_irqs(device_t);
 static void	 mana_gd_remove_irqs(device_t);
 
@@ -1179,6 +1183,16 @@ mana_gd_poll_cq(struct gdma_queue *cq, struct gdma_comp *comp, int num_cqe)
 }
 
 /* XXX filter handler or intr handler? */
+#if 1
+static void
+mana_gd_intr(void *arg)
+{
+	struct gdma_irq_context *gic = arg;
+
+	if (gic->handler)
+		gic->handler(gic->arg);
+}
+#else
 static int
 mana_gd_intr(void *arg)
 {
@@ -1189,6 +1203,7 @@ mana_gd_intr(void *arg)
 
 	return (FILTER_HANDLED);
 }
+#endif
 
 int
 mana_gd_alloc_res_map(uint32_t res_avail,
@@ -1351,7 +1366,7 @@ mana_gd_setup_irqs(device_t dev)
 		}
 
 		rc = bus_setup_intr(dev, gic->res,
-		    INTR_TYPE_NET | INTR_MPSAFE, mana_gd_intr, NULL,
+		    INTR_TYPE_NET | INTR_MPSAFE, NULL, mana_gd_intr,
 		    gic, &gic->cookie);
 		if (unlikely(rc != 0)) {
 			device_printf(dev, "failed to register interrupt "
