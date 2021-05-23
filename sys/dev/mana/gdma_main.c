@@ -500,6 +500,10 @@ mana_gd_process_eqe(struct gdma_queue *eq)
 
 	case GDMA_EQE_TEST_EVENT:
 		gc->test_event_eq_id = eq->id;
+#if 1 /*XXX  */
+		mana_trc_dbg(NULL,
+		    "EQE TEST EVENT received for EQ %u\n", eq->id);
+#endif
 		complete(&gc->eq_test_event);
 		break;
 
@@ -531,6 +535,7 @@ mana_gd_process_eq_events(void *arg)
 	unsigned int arm_bit;
 	uint32_t head, num_eqe;
 	int i;
+	static uint32_t j = 0;
 
 	gc = eq->gdma_dev->gdma_context;
 
@@ -551,7 +556,11 @@ mana_gd_process_eq_events(void *arg)
 		new_bits = (eq->head / num_eqe) & GDMA_EQE_OWNER_MASK;
 		if (owner_bits != new_bits) {
 			device_printf(gc->dev,
-			    "EQ %d: overflow detected\n", eq->id);
+			    "EQ %d: overflow detected, "
+			    "num_eqe = %d, i = %d, j = %u, eq->head = %u "
+			    "old_bits = %u, owner_bits = %u, new_bits = %u\n",
+			    eq->id, num_eqe, i, j, eq->head,
+			    old_bits, owner_bits, new_bits);
 			break;
 		}
 
@@ -559,6 +568,7 @@ mana_gd_process_eq_events(void *arg)
 
 		eq->head++;
 	}
+	j += i;
 
 	/* Always rearm the EQ for HWC. */
 	/* XXX For MANA, rearm it when NAPI is done. */
@@ -695,7 +705,7 @@ mana_gd_test_eq(struct gdma_context *gc, struct gdma_queue *eq)
 	device_t dev = gc->dev;
 	int err;
 
-	mtx_lock(&gc->eq_test_event_mutex);
+	sx_xlock(&gc->eq_test_event_sx);
 
 	init_completion(&gc->eq_test_event);
 	gc->test_event_eq_id = INVALID_QUEUE_ID;
@@ -736,7 +746,7 @@ mana_gd_test_eq(struct gdma_context *gc, struct gdma_queue *eq)
 
 	err = 0;
 out:
-	mtx_unlock(&gc->eq_test_event_mutex);
+	sx_xunlock(&gc->eq_test_event_sx);
 	return err;
 }
 
@@ -796,6 +806,12 @@ static int mana_gd_create_eq(struct gdma_dev *gd,
 	queue->eq.context = spec->eq.context;
 	queue->head |= INITIALIZED_OWNER_BIT(log2_num_entries);
 	queue->eq.log2_throttle_limit = spec->eq.log2_throttle_limit ?: 1;
+
+	mana_trc_dbg(NULL, "!!! hwc EQ size %u, "
+	    "log2_throttle_limit %u, spec %lu, calc %u\n",
+	    queue->queue_size,
+	    queue->eq.log2_throttle_limit, spec->eq.log2_throttle_limit,
+	    log2_num_entries);
 
 	if (create_hwq) {
 		err = mana_gd_create_hw_eq(gc, queue);
@@ -1199,13 +1215,14 @@ mana_gd_intr(void *arg)
 	struct gdma_irq_context *gic = arg;
 
 	if (gic->handler) {
-		mana_trc_dbg(NULL,
-		    "!!! got gdma interrupt\n");
+#if 0
+		if (dbg_print) {
+			mana_trc_dbg(NULL, "!!! got gdma interrupt\n");
+			dbg_print = false;
+		}
+#endif
 
 		gic->handler(gic->arg);
-	} else {
-		mana_trc_dbg(NULL,
-		    "??? strayed interrupt\n");
 	}
 }
 #else
@@ -1596,31 +1613,33 @@ mana_gd_attach(device_t dev)
 		goto err_free_pci_res;
 	}
 
-	mtx_init(&gc->eq_test_event_mutex,
-	    "gdma test event lock", NULL, MTX_DEF);
+	sx_init(&gc->eq_test_event_sx, "gdma test event sx");
 
 	rc = mana_hwc_create_channel(gc);
 	if (rc) {
 		mana_trc_dbg(NULL, "Failed to create hwc channel\n");
-		goto err_remove_irq;
+		if (rc == EIO)
+			goto err_clean_up_gdma;
+		else
+			goto err_remove_irq;
 	}
 
 	rc = mana_gd_verify_vf_version(dev);
 	if (rc) {
 		mana_trc_dbg(NULL, "Failed to verify vf\n");
-		goto err_remove_irq;
+		goto err_clean_up_gdma;
 	}
 
 	rc = mana_gd_query_max_resources(dev);
 	if (rc) {
 		mana_trc_dbg(NULL, "Failed to query max resources\n");
-		goto err_remove_irq;
+		goto err_clean_up_gdma;
 	}
 
 	rc = mana_gd_detect_devices(dev);
 	if (rc) {
 		mana_trc_dbg(NULL, "Failed to detect  mana device\n");
-		goto err_remove_irq;
+		goto err_clean_up_gdma;
 	}
 
 	mana_trc_dbg(NULL, "So far so good\n");
@@ -1629,14 +1648,16 @@ mana_gd_attach(device_t dev)
 	rc = mana_probe(&gc->mana);
 	if (rc) {
 		mana_trc_dbg(NULL, "Failed to probe mana device\n");
+		goto err_clean_up_gdma;
 	}
 #endif
 
 	return (0);
 
-//err_clean_up_gdma:
+err_clean_up_gdma:
 	mana_hwc_destroy_channel(gc);
-	free(gc->cq_table, M_DEVBUF);
+	if (gc->cq_table)
+		free(gc->cq_table, M_DEVBUF);
 	gc->cq_table = NULL;
 err_remove_irq:
 	mana_gd_remove_irqs(dev);

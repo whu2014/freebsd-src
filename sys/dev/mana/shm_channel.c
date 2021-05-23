@@ -203,9 +203,11 @@ mana_smc_setup_hwc(struct shm_channel *sc, bool reset_vf, uint64_t eq_addr,
 	if ((eq_msix_index & VECTOR_MASK) != eq_msix_index)
 		return EINVAL;
 
+#if 0 /* XXX */
 	mana_trc_dbg(NULL, "eq_addr 0x%lx, cq_addr 0x%lx, "
 	    "rq_addr 0x%lx, sq_addr 0x%lx, eq msix index 0x%x\n",
 	    eq_addr, cq_addr, rq_addr, sq_addr, eq_msix_index);
+#endif
 
 	/* Scheme for packing four addresses and extra info into 256 bits.
 	 *
@@ -280,8 +282,10 @@ mana_smc_setup_hwc(struct shm_channel *sc, bool reset_vf, uint64_t eq_addr,
 	 */
 	dword = (uint32_t *)shm_buf;
 	for (i = 0; i < SMC_APERTURE_DWORDS; i++) {
+#if 0 /* XXX */
 		mana_trc_dbg(NULL, "write shm_buf %d, val: 0x%x\n",
 		    i, *dword);
+#endif
 		writel((char *)sc->base + i * SMC_BASIC_UNIT, *dword++);
 	}
 

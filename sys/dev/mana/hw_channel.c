@@ -213,7 +213,7 @@ mana_hwc_init_event_handler(void *ctx, struct gdma_queue *q_self,
 		break;
 	}
 
-#if 1 /*XXX */
+#if 0 /*XXX */
 	mana_trc_dbg(NULL, "hwc got event type %u\n", event->type);
 	if (event->type == GDMA_EQE_HWC_INIT_DATA)
 		mana_trc_dbg(NULL, "hwc init event type %u, value %u\n",
@@ -833,8 +833,9 @@ mana_hwc_create_channel(struct gdma_context *gc)
 	    HW_CHANNEL_VF_BOOTSTRAP_QUEUE_DEPTH,
 	    max_req_msg_size, max_resp_msg_size);
 	if (err) {
+		/* Test failed, but the channel has been established */
 		device_printf(hwc->dev, "Failed to test HWC: %d\n", err);
-		goto out;
+		return EIO;
 	}
 
 	return 0;

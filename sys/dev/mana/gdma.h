@@ -38,6 +38,7 @@
 #include <sys/bus_dma.h>
 #include <sys/types.h>
 #include <sys/limits.h>
+#include <sys/sx.h>
 
 #include "gdma_util.h"
 #include "shm_channel.h"
@@ -417,7 +418,7 @@ struct gdma_context {
 	struct gdma_queue	**cq_table;
 
 	/* Protect eq_test_event and test_event_eq_id  */
-	struct mtx		eq_test_event_mutex;
+	struct sx		eq_test_event_sx;
 	struct completion	eq_test_event;
 	uint32_t		test_event_eq_id;
 
