@@ -274,7 +274,8 @@ mana_gd_alloc_memory(struct gdma_context *gc, unsigned int length,
 	}
 
 	err = bus_dmamem_alloc(gmi->dma_tag, &buf,
-	    BUS_DMA_NOWAIT | BUS_DMA_COHERENT, &gmi->dma_map);
+	    BUS_DMA_NOWAIT | BUS_DMA_NOCACHE, &gmi->dma_map);
+	    // BUS_DMA_NOWAIT | BUS_DMA_COHERENT, &gmi->dma_map);
 	if (err) {
 		device_printf(gc->dev,
 		    "failed to alloc dma mem, err: %d\n", err);
@@ -535,12 +536,15 @@ mana_gd_process_eq_events(void *arg)
 	unsigned int arm_bit;
 	uint32_t head, num_eqe;
 	int i;
-	static uint32_t j = 0;
+	int j;
 
 	gc = eq->gdma_dev->gdma_context;
 
 	num_eqe = eq->queue_size / GDMA_EQE_SIZE;
 	eq_eqe_ptr = eq->queue_mem_ptr;
+
+	bus_dmamap_sync(eq->mem_info.dma_tag, eq->mem_info.dma_map,
+	    BUS_DMASYNC_POSTREAD);
 
 	/* Process up to 5 EQEs at a time, and update the HW head. */
 	for (i = 0; i < 5; i++) {
@@ -549,6 +553,14 @@ mana_gd_process_eq_events(void *arg)
 		owner_bits = eqe_info.owner_bits;
 
 		old_bits = (eq->head / num_eqe - 1) & GDMA_EQE_OWNER_MASK;
+#if 0
+		new_bits = (eq->head / num_eqe) & GDMA_EQE_OWNER_MASK;
+		device_printf(gc->dev,
+		    "EQ %d: eq = %p, q_ptr = %p, i = %d, eq->head = %u, "
+		    "old_bits = %u, got owner_bits = %u, new_bits = %u\n",
+		    eq->id, eq, eq_eqe_ptr, i, eq->head,
+		    old_bits, owner_bits, new_bits);
+#endif
 		/* No more entries */
 		if (owner_bits == old_bits)
 			break;
@@ -557,10 +569,22 @@ mana_gd_process_eq_events(void *arg)
 		if (owner_bits != new_bits) {
 			device_printf(gc->dev,
 			    "EQ %d: overflow detected, "
-			    "num_eqe = %d, i = %d, j = %u, eq->head = %u "
-			    "old_bits = %u, owner_bits = %u, new_bits = %u\n",
-			    eq->id, num_eqe, i, j, eq->head,
-			    old_bits, owner_bits, new_bits);
+			    "i = %d, eq->head = %u "
+			    "got owner_bits = %u, new_bits = %u "
+			    "eqe addr %p, eqe->eqe_info 0x%x, "
+			    "eqe type = %x, reserved1 = %x, client_id = %x, reserved2 = %x, "
+			    "owner_bits = %x\n",
+			    eq->id, i, eq->head,
+			    owner_bits, new_bits,
+			    eqe, eqe->eqe_info,
+			    eqe_info.type, eqe_info.reserved1, eqe_info.client_id, eqe_info.reserved2,
+			    eqe_info.owner_bits);
+			uint32_t *eqe_dump = (uint32_t *) eq_eqe_ptr;
+			for (j = 0; j < 20; j++) {
+				device_printf(gc->dev, "%p: %x\t%x\t%x\t%x\n",
+				    &eqe_dump[j * 4], eqe_dump[j * 4], eqe_dump[j * 4 + 1],
+				    eqe_dump[j * 4 + 2], eqe_dump[j * 4 + 3]);
+			}
 			break;
 		}
 
@@ -568,7 +592,9 @@ mana_gd_process_eq_events(void *arg)
 
 		eq->head++;
 	}
-	j += i;
+
+	bus_dmamap_sync(eq->mem_info.dma_tag, eq->mem_info.dma_map,
+	    BUS_DMASYNC_PREREAD);
 
 	/* Always rearm the EQ for HWC. */
 	/* XXX For MANA, rearm it when NAPI is done. */
@@ -807,11 +833,8 @@ static int mana_gd_create_eq(struct gdma_dev *gd,
 	queue->head |= INITIALIZED_OWNER_BIT(log2_num_entries);
 	queue->eq.log2_throttle_limit = spec->eq.log2_throttle_limit ?: 1;
 
-	mana_trc_dbg(NULL, "!!! hwc EQ size %u, "
-	    "log2_throttle_limit %u, spec %lu, calc %u\n",
-	    queue->queue_size,
-	    queue->eq.log2_throttle_limit, spec->eq.log2_throttle_limit,
-	    log2_num_entries);
+	mana_trc_dbg(NULL, "!!! hwc EQ size %u, queue->head = 0x%x\n",
+	    queue->queue_size, queue->head);
 
 	if (create_hwq) {
 		err = mana_gd_create_hw_eq(gc, queue);
