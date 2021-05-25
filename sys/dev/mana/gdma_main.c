@@ -273,9 +273,13 @@ mana_gd_alloc_memory(struct gdma_context *gc, unsigned int length,
 		return (err);
 	}
 
+	/*
+	 * Must have BUS_DMA_ZERO flag to clear the dma memory.
+	 * Otherwise the queue overflow detection mechanisim does
+	 * not work.
+	 */
 	err = bus_dmamem_alloc(gmi->dma_tag, &buf,
-	    BUS_DMA_NOWAIT | BUS_DMA_NOCACHE, &gmi->dma_map);
-	    // BUS_DMA_NOWAIT | BUS_DMA_COHERENT, &gmi->dma_map);
+	    BUS_DMA_NOWAIT | BUS_DMA_COHERENT | BUS_DMA_ZERO, &gmi->dma_map);
 	if (err) {
 		device_printf(gc->dev,
 		    "failed to alloc dma mem, err: %d\n", err);
@@ -556,10 +560,20 @@ mana_gd_process_eq_events(void *arg)
 #if 0
 		new_bits = (eq->head / num_eqe) & GDMA_EQE_OWNER_MASK;
 		device_printf(gc->dev,
-		    "EQ %d: eq = %p, q_ptr = %p, i = %d, eq->head = %u, "
+		    "EQ %d:  c = %u, i = %d, eq->head = %u, "
 		    "old_bits = %u, got owner_bits = %u, new_bits = %u\n",
-		    eq->id, eq, eq_eqe_ptr, i, eq->head,
+		    eq->id, c, i, eq->head,
 		    old_bits, owner_bits, new_bits);
+#endif
+#if 0
+		if (i == 0) {
+			uint32_t *eqe_dump = (uint32_t *) eq_eqe_ptr;
+			for (j = 0; j < 20; j++) {
+				device_printf(gc->dev, "%p: %x\t%x\t%x\t%x\n",
+				    &eqe_dump[j * 4], eqe_dump[j * 4], eqe_dump[j * 4 + 1],
+				    eqe_dump[j * 4 + 2], eqe_dump[j * 4 + 3]);
+			}
+		}
 #endif
 		/* No more entries */
 		if (owner_bits == old_bits)
@@ -593,6 +607,7 @@ mana_gd_process_eq_events(void *arg)
 		eq->head++;
 	}
 
+	/* XXX Realy need this? */
 	bus_dmamap_sync(eq->mem_info.dma_tag, eq->mem_info.dma_map,
 	    BUS_DMASYNC_PREREAD);
 
@@ -1159,6 +1174,9 @@ mana_gd_post_work_request(struct gdma_queue *wq,
 
 	wq->head += wqe_size / GDMA_WQE_BU_SIZE;
 
+	bus_dmamap_sync(wq->mem_info.dma_tag, wq->mem_info.dma_map,
+	    BUS_DMASYNC_PREWRITE);
+
 	return 0;
 }
 
@@ -1212,6 +1230,9 @@ mana_gd_poll_cq(struct gdma_queue *cq, struct gdma_comp *comp, int num_cqe)
 {
 	int cqe_idx;
 	int ret;
+
+	bus_dmamap_sync(cq->mem_info.dma_tag, cq->mem_info.dma_map,
+	    BUS_DMASYNC_POSTREAD);
 
 	for (cqe_idx = 0; cqe_idx < num_cqe; cqe_idx++) {
 		ret = mana_gd_read_cqe(cq, &comp[cqe_idx]);

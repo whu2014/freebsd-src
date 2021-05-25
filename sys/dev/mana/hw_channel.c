@@ -37,6 +37,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/kthread.h>
 #include <sys/malloc.h>
 #include <sys/mutex.h>
+#include <sys/bus.h>
+#include <machine/bus.h>
 
 #include "mana.h"
 #include "hw_channel.h"
@@ -243,9 +245,13 @@ mana_hwc_rx_event_handler(void *ctx, uint32_t gdma_rxq_id,
 		return;
 	}
 
+
 	rq = hwc_rxq->gdma_wq;
 	wqe = mana_gd_get_wqe_ptr(rq, rx_oob->wqe_offset / GDMA_WQE_BU_SIZE);
 	dma_oob = (struct gdma_wqe *)wqe;
+
+	bus_dmamap_sync(rq->mem_info.dma_tag, rq->mem_info.dma_map,
+	    BUS_DMASYNC_POSTREAD);
 
 	sge = (struct gdma_sge *)(wqe + 8 + dma_oob->inline_oob_size_div4 * 4);
 
@@ -262,12 +268,20 @@ mana_hwc_rx_event_handler(void *ctx, uint32_t gdma_rxq_id,
 		return;
 	}
 
+	bus_dmamap_sync(hwc_rxq->msg_buf->mem_info.dma_tag,
+	    hwc_rxq->msg_buf->mem_info.dma_map,
+	    BUS_DMASYNC_POSTREAD);
+
 	mana_hwc_handle_resp(hwc, rx_oob->tx_oob_data_size, resp);
 
 	/* Do no longer use 'resp', because the buffer is posted to the HW
 	 * in the below mana_hwc_post_rx_wqe().
 	 */
 	resp = NULL;
+
+	bus_dmamap_sync(hwc_rxq->msg_buf->mem_info.dma_tag,
+	    hwc_rxq->msg_buf->mem_info.dma_map,
+	    BUS_DMASYNC_PREREAD);
 
 	mana_hwc_post_rx_wqe(hwc_rxq, rx_req);
 }
@@ -284,6 +298,10 @@ mana_hwc_tx_event_handler(void *ctx, uint32_t gdma_txq_id,
 		mana_trc_warn(NULL, "unmatched tx queue %u != %u\n",
 		    hwc_txq->gdma_wq->id, gdma_txq_id);
 	}
+
+	bus_dmamap_sync(hwc_txq->gdma_wq->mem_info.dma_tag,
+	    hwc_txq->gdma_wq->mem_info.dma_map,
+	    BUS_DMASYNC_POSTWRITE);
 }
 
 static int
@@ -366,6 +384,10 @@ mana_hwc_comp_event(void *ctx, struct gdma_queue *q_self)
 			    completions[i].wq_num,
 			    &comp_data);
 	}
+
+	/* XXX Really need this? */
+	bus_dmamap_sync(q_self->mem_info.dma_tag, q_self->mem_info.dma_map,
+	    BUS_DMASYNC_POSTREAD);
 
 	mana_gd_arm_cq(q_self);
 }
