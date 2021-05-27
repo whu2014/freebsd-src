@@ -1017,6 +1017,73 @@ mana_gd_verify_vf_version(device_t dev)
 	return 0;
 }
 
+int
+mana_gd_register_device(struct gdma_dev *gd)
+{
+	struct gdma_context *gc = gd->gdma_context;
+	struct gdma_register_device_resp resp = {};
+	struct gdma_general_req req = {};
+	int err;
+
+	gd->pdid = INVALID_PDID;
+	gd->doorbell = INVALID_DOORBELL;
+	gd->gpa_mkey = INVALID_MEM_KEY;
+
+	mana_gd_init_req_hdr(&req.hdr, GDMA_REGISTER_DEVICE, sizeof(req),
+	    sizeof(resp));
+
+	req.hdr.dev_id = gd->dev_id;
+
+	err = mana_gd_send_request(gc, sizeof(req), &req, sizeof(resp), &resp);
+	if (err || resp.hdr.status) {
+		device_printf(gc->dev,
+		    "gdma_register_device_resp failed: %d, 0x%x\n",
+		    err, resp.hdr.status);
+		return err ? err : -EPROTO;
+	}
+
+	gd->pdid = resp.pdid;
+	gd->gpa_mkey = resp.gpa_mkey;
+	gd->doorbell = resp.db_id;
+
+	mana_trc_dbg(NULL, "mana device pdid %u, gpa_mkey %u, doorbell %u \n",
+	    gd->pdid, gd->gpa_mkey, gd->doorbell);
+
+	return 0;
+}
+
+int
+mana_gd_deregister_device(struct gdma_dev *gd)
+{
+	struct gdma_context *gc = gd->gdma_context;
+	struct gdma_general_resp resp = {};
+	struct gdma_general_req req = {};
+	int err;
+
+	if (gd->pdid == INVALID_PDID)
+		return EINVAL;
+
+	mana_gd_init_req_hdr(&req.hdr, GDMA_DEREGISTER_DEVICE, sizeof(req),
+	    sizeof(resp));
+
+	req.hdr.dev_id = gd->dev_id;
+
+	err = mana_gd_send_request(gc, sizeof(req), &req, sizeof(resp), &resp);
+	if (err || resp.hdr.status) {
+		device_printf(gc->dev,
+		    "Failed to deregister device: %d, 0x%x\n",
+		    err, resp.hdr.status);
+		if (!err)
+			err = EPROTO;
+	}
+
+	gd->pdid = INVALID_PDID;
+	gd->doorbell = INVALID_DOORBELL;
+	gd->gpa_mkey = INVALID_MEM_KEY;
+
+	return err;
+}
+
 uint32_t
 mana_gd_wq_avail_space(struct gdma_queue *wq)
 {
@@ -1685,16 +1752,14 @@ mana_gd_attach(device_t dev)
 		mana_trc_dbg(NULL, "Failed to detect  mana device\n");
 		goto err_clean_up_gdma;
 	}
-
-	mana_trc_dbg(NULL, "So far so good\n");
-
-#if 0
+#if 1
 	rc = mana_probe(&gc->mana);
 	if (rc) {
 		mana_trc_dbg(NULL, "Failed to probe mana device\n");
 		goto err_clean_up_gdma;
 	}
 #endif
+	mana_trc_dbg(NULL, "So far so good\n");
 
 	return (0);
 
@@ -1726,6 +1791,8 @@ mana_gd_detach(device_t dev)
 #if 1
 	struct gdma_context *gc = device_get_softc(dev);
 	mana_trc_dbg(NULL, "mana_gd_detach called\n");
+
+	mana_remove(&gc->mana);
 
 	mana_hwc_destroy_channel(gc);
 	free(gc->cq_table, M_DEVBUF);

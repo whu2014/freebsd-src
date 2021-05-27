@@ -264,6 +264,7 @@ dev/isci/scil/scif_sas_task_request_states.c			optional isci
 dev/isci/scil/scif_sas_timer.c					optional isci
 dev/itwd/itwd.c							optional itwd
 dev/mana/gdma_main.c						optional mana
+dev/mana/mana_en.c						optional mana
 dev/mana/mana_sysctl.c						optional mana
 dev/mana/shm_channel.c						optional mana
 dev/mana/hw_channel.c						optional mana
