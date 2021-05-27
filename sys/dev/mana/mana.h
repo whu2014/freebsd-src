@@ -62,39 +62,6 @@
 #define DEVICE_NAME	"Microsoft Azure Network Adapter (MANA)"
 #define DEVICE_DESC	"MANA adapter"
 
-/* Levels */
-#define MANA_ALERT	(1 << 0) /* Alerts are providing more error info.     */
-#define MANA_WARNING	(1 << 1) /* Driver output is more error sensitive.    */
-#define MANA_INFO	(1 << 2) /* Provides additional driver info.	      */
-#define MANA_DBG	(1 << 3) /* Driver output for debugging.	      */
-
-extern int mana_log_level;
-
-#define mana_trace_raw(ctx, level, fmt, args...)			\
-	do {							\
-		((void)(ctx));					\
-		if (((level) & mana_log_level) != (level))	\
-			break;					\
-		printf(fmt, ##args);				\
-	} while (0)
-
-#define mana_trace(ctx, level, fmt, args...)			\
-	mana_trace_raw(ctx, level, "%s() [TID:%d]: "		\
-	    fmt, __func__, curthread->td_tid, ##args)
-
-
-#define mana_trc_dbg(ctx, format, arg...)	\
-	mana_trace(ctx, MANA_DBG, format, ##arg)
-#define mana_trc_info(ctx, format, arg...)	\
-	mana_trace(ctx, MANA_INFO, format, ##arg)
-#define mana_trc_warn(ctx, format, arg...)	\
-	mana_trace(ctx, MANA_WARNING, format, ##arg)
-#define mana_trc_err(ctx, format, arg...)	\
-	mana_trace(ctx, MANA_ALERT, format, ##arg)
-
-#define unlikely(x)	__predict_false(!!(x))
-#define likely(x)	__predict_true(!!(x))
-
 /*
  * Supported PCI vendor and devices IDs
  */

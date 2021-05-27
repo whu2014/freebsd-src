@@ -710,10 +710,7 @@ mana_hwc_establish_channel(struct gdma_context *gc, uint16_t *q_depth,
 	struct gdma_queue *sq = hwc->txq->gdma_wq;
 	struct gdma_queue *eq = hwc->cq->gdma_eq;
 	struct gdma_queue *cq = hwc->cq->gdma_cq;
-	// struct gdma_irq_context *gic;
 	int err;
-
-	// gic = &gc->irq_contexts[eq->eq.msix_index];
 
 	init_completion(&hwc->hwc_init_eqe_comp);
 
