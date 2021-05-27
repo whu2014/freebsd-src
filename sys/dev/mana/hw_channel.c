@@ -259,6 +259,10 @@ mana_hwc_rx_event_handler(void *ctx, uint32_t gdma_rxq_id,
 	rq_base_addr = hwc_rxq->msg_buf->mem_info.dma_handle;
 	rx_req_idx = (sge->address - rq_base_addr) / hwc->max_req_msg_size;
 
+	bus_dmamap_sync(hwc_rxq->msg_buf->mem_info.dma_tag,
+	    hwc_rxq->msg_buf->mem_info.dma_map,
+	    BUS_DMASYNC_POSTREAD);
+
 	rx_req = &hwc_rxq->msg_buf->reqs[rx_req_idx];
 	resp = (struct gdma_resp_hdr *)rx_req->buf_va;
 
@@ -267,10 +271,6 @@ mana_hwc_rx_event_handler(void *ctx, uint32_t gdma_rxq_id,
 		    resp->response.hwc_msg_id);
 		return;
 	}
-
-	bus_dmamap_sync(hwc_rxq->msg_buf->mem_info.dma_tag,
-	    hwc_rxq->msg_buf->mem_info.dma_map,
-	    BUS_DMASYNC_POSTREAD);
 
 	mana_hwc_handle_resp(hwc, rx_oob->tx_oob_data_size, resp);
 
