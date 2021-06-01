@@ -145,7 +145,15 @@ struct mana_txq {
 	struct mana_stats stats;
 };
 
-#define	MAX_MBUF_FRAGS		16
+
+/*
+ * Max WQE size is 512B. The first 8B is for GDMA Out of Band (OOB),
+ * next is the Client OOB can be either 8B or 24B. Thus, the max
+ * space for SGL entries in a singel WQE is 512 - 8 - 8 = 496B. Since each
+ * SGL is 16B in size, the max number of SGLs in a WQE is 496/16 = 31.
+ * Save one for emergency use, set the MAX_MBUF_FRAGS allowed to 30.
+ */
+#define	MAX_MBUF_FRAGS		30
 
 /* mbuf data and frags dma mappings */
 struct mana_mbuf_head {
@@ -389,6 +397,7 @@ struct mana_context {
 struct mana_port_context {
 	struct mana_context	*ac;
 	struct ifnet		*ndev;
+	struct ifmedia		media;
 
 	uint8_t			mac_addr[ETHER_ADDR_LEN];
 

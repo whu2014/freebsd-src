@@ -71,6 +71,361 @@ __FBSDID("$FreeBSD$");
 
 #include "mana.h"
 
+void
+mana_rss_key_fill(void *k, size_t size)
+{
+	static bool rss_key_generated = false;
+	static uint8_t rss_key[MANA_HASH_KEY_SIZE];
+
+	KASSERT(size <= MANA_HASH_KEY_SIZE,
+	    ("Request more buytes than MANA RSS key can hold"));
+
+	if (!rss_key_generated) {
+		arc4random_buf(rss_key, MANA_HASH_KEY_SIZE);
+		rss_key_generated = true;
+	}
+	memcpy(k, rss_key, size);
+}
+
+static int
+mana_ifmedia_change(struct ifnet *ifp __unused)
+{
+	return EOPNOTSUPP;
+}
+
+static void
+mana_ifmedia_status(struct ifnet *ifp, struct ifmediareq *ifmr)
+{
+	ifmr->ifm_status = IFM_AVALID;
+	ifmr->ifm_active = IFM_ETHER;
+	/*XXX fix this */
+	if (0) {
+		ifmr->ifm_status |= IFM_ACTIVE;
+		ifmr->ifm_active |= IFM_UNKNOWN | IFM_FDX;
+	}
+}
+
+static uint64_t
+mana_get_counter(struct ifnet *ifp, ift_counter cnt)
+{
+	return (if_get_counter_default(ifp, cnt));
+}
+
+static void
+mana_qflush(struct ifnet *ifp)
+{
+	if_qflush(ifp);
+}
+
+static int
+mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
+{
+	//struct ifreq *ifr = (struct ifreq *)data;
+	int rc = 0;
+
+	switch (command) {
+	case SIOCSIFMTU:
+	case SIOCSIFFLAGS:
+	default:
+		rc = ether_ioctl(ifp, command, data);
+		break;
+	}
+
+	return (rc);
+}
+
+static void
+mana_init(void *arg)
+{
+	;
+}
+
+static int
+mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
+{
+	if (unlikely((if_getdrvflags(ifp) & IFF_DRV_RUNNING) == 0))
+		return ENODEV;
+
+	return (EBUSY);
+}
+
+static int
+mana_init_port_context(struct mana_port_context *apc)
+{
+	apc->rxqs = mallocarray(apc->num_queues, sizeof(struct mana_rxq *),
+	    M_DEVBUF, M_WAITOK | M_ZERO);
+
+	return !apc->rxqs ? ENOMEM : 0;
+}
+
+static int
+mana_send_request(struct mana_context *ac, void *in_buf,
+    uint32_t in_len, void *out_buf, uint32_t out_len)
+{
+	struct gdma_context *gc = ac->gdma_dev->gdma_context;
+	struct gdma_resp_hdr *resp = out_buf;
+	struct gdma_req_hdr *req = in_buf;
+	device_t dev = gc->dev;
+	atomic_t activity_id;
+	int err;
+
+	req->dev_id = gc->mana.dev_id;
+	req->activity_id = atomic_inc_return(&activity_id);
+
+	mana_trc_dbg(NULL, "activity_id  = %u\n", activity_id);
+
+	err = mana_gd_send_request(gc, in_len, in_buf, out_len,
+	    out_buf);
+	if (err || resp->status) {
+		device_printf(dev, "Failed to send mana message: %d, 0x%x\n",
+			err, resp->status);
+		return err ? err : EPROTO;
+	}
+
+	if (req->dev_id.as_uint32 != resp->dev_id.as_uint32 ||
+	    req->activity_id != resp->activity_id) {
+		device_printf(dev,
+		    "Unexpected mana message response: %x,%x,%x,%x\n",
+		    req->dev_id.as_uint32, resp->dev_id.as_uint32,
+		    req->activity_id, resp->activity_id);
+		return EPROTO;
+	}
+
+	return 0;
+}
+
+static int
+mana_verify_resp_hdr(const struct gdma_resp_hdr *resp_hdr,
+    const enum mana_command_code expected_code,
+    const uint32_t min_size)
+{
+	if (resp_hdr->response.msg_type != expected_code)
+		return EPROTO;
+
+	if (resp_hdr->response.msg_version < GDMA_MESSAGE_V1)
+		return EPROTO;
+
+	if (resp_hdr->response.msg_size < min_size)
+		return EPROTO;
+
+	return 0;
+}
+
+static int
+mana_query_device_cfg(struct mana_context *ac, uint32_t proto_major_ver,
+    uint32_t proto_minor_ver, uint32_t proto_micro_ver,
+    uint16_t *max_num_vports)
+{
+	struct gdma_context *gc = ac->gdma_dev->gdma_context;
+	struct mana_query_device_cfg_resp resp = {};
+	struct mana_query_device_cfg_req req = {};
+	device_t dev = gc->dev;
+	int err = 0;
+
+	mana_gd_init_req_hdr(&req.hdr, MANA_QUERY_DEV_CONFIG,
+	    sizeof(req), sizeof(resp));
+	req.proto_major_ver = proto_major_ver;
+	req.proto_minor_ver = proto_minor_ver;
+	req.proto_micro_ver = proto_micro_ver;
+
+	err = mana_send_request(ac, &req, sizeof(req), &resp, sizeof(resp));
+	if (err) {
+		device_printf(dev, "Failed to query config: %d", err);
+		return err;
+	}
+
+	err = mana_verify_resp_hdr(&resp.hdr, MANA_QUERY_DEV_CONFIG,
+	    sizeof(resp));
+	if (err || resp.hdr.status) {
+		device_printf(dev, "Invalid query result: %d, 0x%x\n", err,
+		    resp.hdr.status);
+		if (!err)
+			err = EPROTO;
+		return err;
+	}
+
+	*max_num_vports = resp.max_num_vports;
+
+	mana_trc_dbg(NULL, "mana max_num_vports from device = %d\n",
+	    *max_num_vports);
+
+	return 0;
+}
+
+static int
+mana_query_vport_cfg(struct mana_port_context *apc, uint32_t vport_index,
+    uint32_t *max_sq, uint32_t *max_rq, uint32_t *num_indir_entry)
+{
+	struct mana_query_vport_cfg_resp resp = {};
+	struct mana_query_vport_cfg_req req = {};
+	int err;
+
+	mana_gd_init_req_hdr(&req.hdr, MANA_QUERY_VPORT_CONFIG,
+	    sizeof(req), sizeof(resp));
+
+	req.vport_index = vport_index;
+
+	err = mana_send_request(apc->ac, &req, sizeof(req), &resp,
+	    sizeof(resp));
+	if (err)
+		return err;
+
+	err = mana_verify_resp_hdr(&resp.hdr, MANA_QUERY_VPORT_CONFIG,
+	    sizeof(resp));
+	if (err)
+		return err;
+
+	if (resp.hdr.status)
+		return EPROTO;
+
+	*max_sq = resp.max_num_sq;
+	*max_rq = resp.max_num_rq;
+	*num_indir_entry = resp.num_indirection_ent;
+
+	apc->port_handle = resp.vport;
+	memcpy(apc->mac_addr, resp.mac_addr, ETHER_ADDR_LEN);
+
+	return 0;
+}
+
+static int
+mana_init_port(struct ifnet *ndev)
+{
+	struct mana_port_context *apc = netdev_priv(ndev);
+	uint32_t max_txq, max_rxq, max_queues;
+	int port_idx = apc->port_idx;
+	uint32_t num_indirect_entries;
+	int err;
+
+	err = mana_init_port_context(apc);
+	if (err)
+		return err;
+
+	err = mana_query_vport_cfg(apc, port_idx, &max_txq, &max_rxq,
+	    &num_indirect_entries);
+	if (err) {
+		netdev_err(ndev, "Failed to query info for vPort 0\n");
+		goto reset_apc;
+	}
+
+	max_queues = min_t(uint32_t, max_txq, max_rxq);
+	if (apc->max_queues > max_queues)
+		apc->max_queues = max_queues;
+
+	if (apc->num_queues > apc->max_queues)
+		apc->num_queues = apc->max_queues;
+
+	// ether_addr_copy(ndev->dev_addr, apc->mac_addr);
+
+	return 0;
+
+reset_apc:
+	free(apc->rxqs, M_DEVBUF);
+	apc->rxqs = NULL;
+	return err;
+}
+
+static int
+mana_probe_port(struct mana_context *ac, int port_idx,
+    struct ifnet **ndev_storage)
+{
+	struct gdma_context *gc = ac->gdma_dev->gdma_context;
+	struct mana_port_context *apc;
+	struct ifnet *ndev;
+	int err;
+
+	ndev = if_alloc_dev(IFT_ETHER, gc->dev);
+	if (!ndev) {
+		mana_trc_err(NULL, "Failed to allocate ifnet struct\n");
+		return ENOMEM;
+	}
+
+	*ndev_storage = ndev;
+
+	apc = malloc(sizeof(*apc), M_DEVBUF, M_WAITOK | M_ZERO);
+	if (!apc) {
+		mana_trc_err(NULL, "Failed to allocate port context\n");
+		err = ENOMEM;
+		goto free_net;
+	}
+
+	apc->ac = ac;
+	apc->ndev = ndev;
+	apc->max_queues = gc->max_num_queues;
+	apc->num_queues = min_t(uint, gc->max_num_queues, MANA_MAX_NUM_QUEUES);
+	apc->port_handle = INVALID_MANA_HANDLE;
+	apc->port_idx = port_idx;
+
+	/* XXX name */
+	if_initname(ndev, device_get_name(gc->dev), port_idx);
+	if_setdev(ndev,gc->dev);
+	if_setsoftc(ndev, apc);
+
+	if_setflags(ndev, IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST);
+	if_setinitfn(ndev, mana_init);
+	if_settransmitfn(ndev, mana_start_xmit);
+	if_setqflushfn(ndev, mana_qflush);
+	if_setioctlfn(ndev, mana_ioctl);
+	if_setgetcounterfn(ndev, mana_get_counter);
+
+	if_setmtu(ndev, ETHERMTU);
+	if_setbaudrate(ndev, 0);
+
+	// netif_carrier_off(ndev);
+
+	mana_rss_key_fill(apc->hashkey, MANA_HASH_KEY_SIZE);
+
+	err = mana_init_port(ndev);
+	if (err)
+		goto reset_apc;
+
+#if 0
+	ndev->hw_features = NETIF_F_SG | NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM;
+	ndev->hw_features |= NETIF_F_RXCSUM;
+	ndev->hw_features |= NETIF_F_TSO | NETIF_F_TSO6;
+	ndev->hw_features |= NETIF_F_RXHASH;
+	ndev->features = ndev->hw_features;
+	ndev->vlan_features = 0;
+#endif
+
+	ndev->if_capabilities |= IFCAP_TXCSUM | IFCAP_TXCSUM_IPV6;
+	ndev->if_capabilities |= IFCAP_RXCSUM | IFCAP_RXCSUM_IPV6;
+	ndev->if_capabilities |= IFCAP_TSO4 | IFCAP_TSO6;
+
+	ndev->if_capabilities |= IFCAP_JUMBO_MTU;
+
+	/* Enable all available capabilities by default. */
+	ndev->if_capenable = ndev->if_capabilities;
+
+#define MANA_TSO_MAXSEG_SZ	PAGE_SIZE
+
+	/* TSO parameters */
+	ndev->if_hw_tsomax = MANA_MBUF_FRAGS * MANA_TSO_MAXSEG_SZ -
+	    (ETHER_HDR_LEN + ETHER_VLAN_ENCAP_LEN);
+	ifp->if_hw_tsomaxsegcount = MANA_MBUF_FRAGS;
+	ifp->if_hw_tsomaxsegsize = PAGE_SIZE;
+
+	ifmedia_init(&apc->media, IFM_IMASK,
+	    mana_ifmedia_change, mana_ifmedia_status);
+	ifmedia_add(&apc->media, IFM_ETHER | IFM_AUTO, 0, NULL);
+	ifmedia_set(&apc->media, IFM_ETHER | IFM_AUTO);
+
+	ether_ifattach(ndev, apc->mac_addr);
+
+	/* Tell the stack that the interface is not active */
+	if_setdrvflagbits(ndev, IFF_DRV_OACTIVE, IFF_DRV_RUNNING);
+
+	return 0;
+
+reset_apc:
+	free(apc, M_DEVBUF);
+free_net:
+	*ndev_storage = NULL;
+	if_printf(ndev, "Failed to probe vPort %d: %d\n", port_idx, err);
+	if_free(ndev);
+	return err;
+}
+
 int mana_probe(struct gdma_dev *gd)
 {
 	struct gdma_context *gc = gd->gdma_context;
@@ -94,22 +449,22 @@ int mana_probe(struct gdma_dev *gd)
 	ac->num_ports = 1;
 	gd->driver_data = ac;
 
-#if 0
 	err = mana_query_device_cfg(ac, MANA_MAJOR_VERSION, MANA_MINOR_VERSION,
-				    MANA_MICRO_VERSION, &ac->num_ports);
+	    MANA_MICRO_VERSION, &ac->num_ports);
 	if (err)
 		goto out;
 
 	if (ac->num_ports > MAX_PORTS_IN_MANA_DEV)
 		ac->num_ports = MAX_PORTS_IN_MANA_DEV;
 
+#if 1
 	for (i = 0; i < ac->num_ports; i++) {
 		err = mana_probe_port(ac, i, &ac->ports[i]);
 		if (err)
 			break;
 	}
-out:
 #endif
+out:
 	if (err)
 		mana_remove(gd);
 

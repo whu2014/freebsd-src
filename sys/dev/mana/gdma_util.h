@@ -93,6 +93,13 @@ extern int mana_log_level;
 #define test_bit(i, a)							\
     ((((volatile const unsigned long *)(a))[BIT_WORD(i)]) & BIT_MASK(i))
 
+typedef volatile uint32_t atomic_t;
+
+#define	atomic_add_return(v, p)		(atomic_fetchadd_int(p, v) + (v))
+#define	atomic_sub_return(v, p)		(atomic_fetchadd_int(p, -(v)) - (v))
+#define	atomic_inc_return(p)		atomic_add_return(1, p)
+#define	atomic_dec_return(p)		atomic_sub_return(1, p)
+
 static inline void
 bitmap_set(unsigned long *map, unsigned int start, int nr)
 {
