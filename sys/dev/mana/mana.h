@@ -36,8 +36,11 @@
 
 #include <sys/types.h>
 #include <sys/proc.h>
+#include <sys/socket.h>
 
 #include <net/ethernet.h>
+#include <net/if.h>
+#include <net/if_media.h>
 
 #include "gdma.h"
 #include "hw_channel.h"
@@ -450,7 +453,7 @@ int mana_config_rss(struct mana_port_context *ac, enum TRI_STATE rx,
 
 int mana_alloc_queues(struct ifnet *ndev);
 int mana_attach(struct ifnet *ndev);
-int mana_detach(struct ifnet *ndev, bool from_close);
+int mana_detach(struct ifnet *ndev);
 
 int mana_probe(struct gdma_dev *gd);
 void mana_remove(struct gdma_dev *gd);

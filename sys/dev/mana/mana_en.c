@@ -54,7 +54,6 @@ __FBSDID("$FreeBSD$");
 #include <net/if_var.h>
 #include <net/if_arp.h>
 #include <net/if_dl.h>
-#include <net/if_media.h>
 #include <net/if_types.h>
 #include <net/if_vlan_var.h>
 #ifdef RSS
@@ -71,7 +70,7 @@ __FBSDID("$FreeBSD$");
 
 #include "mana.h"
 
-void
+static void
 mana_rss_key_fill(void *k, size_t size)
 {
 	static bool rss_key_generated = false;
@@ -138,6 +137,7 @@ mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 	//struct ifreq *ifr = (struct ifreq *)data;
 	int rc = 0;
 
+#if 0
 	switch (command) {
 	case SIOCSIFMTU:
 	case SIOCSIFFLAGS:
@@ -145,14 +145,9 @@ mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 		rc = ether_ioctl(ifp, command, data);
 		break;
 	}
+#endif
 
 	return (rc);
-}
-
-static void
-mana_init(void *arg)
-{
-	;
 }
 
 static int
@@ -162,6 +157,13 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 		return ENODEV;
 
 	return (EBUSY);
+}
+
+static void
+mana_cleanup_port_context(struct mana_port_context *apc)
+{
+	free(apc->rxqs, M_DEVBUF);
+	apc->rxqs = NULL;
 }
 
 static int
@@ -306,7 +308,7 @@ mana_query_vport_cfg(struct mana_port_context *apc, uint32_t vport_index,
 static int
 mana_init_port(struct ifnet *ndev)
 {
-	struct mana_port_context *apc = netdev_priv(ndev);
+	struct mana_port_context *apc = if_getsoftc(ndev);
 	uint32_t max_txq, max_rxq, max_queues;
 	int port_idx = apc->port_idx;
 	uint32_t num_indirect_entries;
@@ -319,7 +321,7 @@ mana_init_port(struct ifnet *ndev)
 	err = mana_query_vport_cfg(apc, port_idx, &max_txq, &max_rxq,
 	    &num_indirect_entries);
 	if (err) {
-		netdev_err(ndev, "Failed to query info for vPort 0\n");
+		if_printf(ndev, "Failed to query info for vPort 0\n");
 		goto reset_apc;
 	}
 
@@ -337,6 +339,136 @@ mana_init_port(struct ifnet *ndev)
 reset_apc:
 	free(apc->rxqs, M_DEVBUF);
 	apc->rxqs = NULL;
+	return err;
+}
+
+static int
+mana_up(struct mana_port_context *apc)
+{
+#if 0
+	int err;
+
+	err = mana_alloc_queues(apc->ndev);
+	if (err)
+		return err;
+#endif
+	apc->port_is_up = true;
+
+	/* Ensure port state updated before txq state */
+	wmb();
+
+#if 0
+	if_link_state_change(apc->ndev, LINK_STATE_UP);
+	if_setdrvflagbits(apc->ndev, IFF_DRV_RUNNING, IFF_DRV_OACTIVE);
+#endif
+
+	return 0;
+}
+
+
+static void
+mana_init(void *arg)
+{
+	struct mana_port_context *apc = (struct mana_port_context *)arg;
+
+	MANA_APC_LOCK_LOCK(apc);
+	if (!apc->port_is_up) {
+		mana_up(apc);
+	}
+	MANA_APC_LOCK_UNLOCK(apc);
+}
+
+static int
+mana_dealloc_queues(struct ifnet *ndev)
+{
+#if 0
+	struct mana_port_context *apc = netdev_priv(ndev);
+	struct mana_txq *txq;
+	int i, err;
+
+	if (apc->port_is_up)
+		return -EINVAL;
+
+	/* No packet can be transmitted now since apc->port_is_up is false.
+	 * There is still a tiny chance that mana_poll_tx_cq() can re-enable
+	 * a txq because it may not timely see apc->port_is_up being cleared
+	 * to false, but it doesn't matter since mana_start_xmit() drops any
+	 * new packets due to apc->port_is_up being false.
+	 *
+	 * Drain all the in-flight TX packets
+	 */
+	for (i = 0; i < apc->num_queues; i++) {
+		txq = &apc->tx_qp[i].txq;
+
+		while (atomic_read(&txq->pending_sends) > 0)
+			usleep_range(1000, 2000);
+	}
+
+	/* We're 100% sure the queues can no longer be woken up, because
+	 * we're sure now mana_poll_tx_cq() can't be running.
+	 */
+
+	apc->rss_state = TRI_STATE_FALSE;
+	err = mana_config_rss(apc, TRI_STATE_FALSE, false, false);
+	if (err) {
+		netdev_err(ndev, "Failed to disable vPort: %d\n", err);
+		return err;
+	}
+
+	/* TODO: Implement RX fencing */
+	ssleep(1);
+
+	mana_destroy_vport(apc);
+
+	mana_destroy_eq(apc->ac->gdma_dev->gdma_context, apc);
+#endif
+
+	return 0;
+}
+
+static int
+mana_down(struct mana_port_context *apc)
+{
+	int err = 0;
+
+	apc->port_st_save = apc->port_is_up;
+	apc->port_is_up = false;
+
+	/* Ensure port state updated before txq state */
+	wmb();
+
+	if (apc->port_st_save) {
+		if_setdrvflagbits(apc->ndev, IFF_DRV_OACTIVE,
+		    IFF_DRV_RUNNING);
+		if_link_state_change(apc->ndev, LINK_STATE_DOWN);
+
+		err = mana_dealloc_queues(apc->ndev);
+	}
+
+	return err;
+}
+
+int
+mana_detach(struct ifnet *ndev)
+{
+	struct mana_port_context *apc = if_getsoftc(ndev);
+	int err;
+
+	ether_ifdetach(ndev);
+
+	if (!apc)
+		return 0;
+
+	MANA_APC_LOCK_LOCK(apc);
+	err = mana_down(apc);
+	MANA_APC_LOCK_UNLOCK(apc);
+
+	mana_cleanup_port_context(apc);
+
+	MANA_APC_LOCK_DESTROY(apc);
+
+	free(apc, M_DEVBUF);
+
 	return err;
 }
 
@@ -367,7 +499,8 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 	apc->ac = ac;
 	apc->ndev = ndev;
 	apc->max_queues = gc->max_num_queues;
-	apc->num_queues = min_t(uint, gc->max_num_queues, MANA_MAX_NUM_QUEUES);
+	apc->num_queues = min_t(unsigned int,
+	    gc->max_num_queues, MANA_MAX_NUM_QUEUES);
 	apc->port_handle = INVALID_MANA_HANDLE;
 	apc->port_idx = port_idx;
 
@@ -417,10 +550,10 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 #define MANA_TSO_MAXSEG_SZ	PAGE_SIZE
 
 	/* TSO parameters */
-	ndev->if_hw_tsomax = MANA_MBUF_FRAGS * MANA_TSO_MAXSEG_SZ -
+	ndev->if_hw_tsomax = MAX_MBUF_FRAGS * MANA_TSO_MAXSEG_SZ -
 	    (ETHER_HDR_LEN + ETHER_VLAN_ENCAP_LEN);
-	ifp->if_hw_tsomaxsegcount = MANA_MBUF_FRAGS;
-	ifp->if_hw_tsomaxsegsize = PAGE_SIZE;
+	ndev->if_hw_tsomaxsegcount = MAX_MBUF_FRAGS;
+	ndev->if_hw_tsomaxsegsize = PAGE_SIZE;
 
 	ifmedia_init(&apc->media, IFM_IMASK,
 	    mana_ifmedia_change, mana_ifmedia_status);
@@ -449,7 +582,7 @@ int mana_probe(struct gdma_dev *gd)
 	device_t dev = gc->dev;
 	struct mana_context *ac;
 	int err;
-	// int i;
+	int i;
 
 	device_printf(dev, "%s protocol version: %d.%d.%d\n", DEVICE_NAME,
 		 MANA_MAJOR_VERSION, MANA_MINOR_VERSION, MANA_MICRO_VERSION);
@@ -493,7 +626,6 @@ mana_remove(struct gdma_dev *gd)
 {
 	struct gdma_context *gc = gd->gdma_context;
 	struct mana_context *ac = gd->driver_data;
-#if 1
 	device_t dev = gc->dev;
 	struct ifnet *ndev;
 	int i;
@@ -506,21 +638,11 @@ mana_remove(struct gdma_dev *gd)
 			goto out;
 		}
 
-		/* All cleanup actions should stay after rtnl_lock(), otherwise
-		 * other functions may access partially cleaned up data.
-		 */
-		rtnl_lock();
+		mana_detach(ndev);
 
-		mana_detach(ndev, false);
-
-		unregister_netdevice(ndev);
-
-		rtnl_unlock();
-
-		free_netdev(ndev);
+		if_free(ndev);
 	}
 out:
-#endif
 	mana_gd_deregister_device(gd);
 	gd->driver_data = NULL;
 	gd->gdma_context = NULL;
