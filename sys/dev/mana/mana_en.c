@@ -96,13 +96,28 @@ mana_ifmedia_change(struct ifnet *ifp __unused)
 static void
 mana_ifmedia_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 {
+	struct mana_port_context *apc = if_getsoftc(ifp);
+
+	if (!apc) {
+		if_printf(ifp, "Port not available\n");
+		return;
+	}
+
+	MANA_APC_LOCK_LOCK(apc);
+
 	ifmr->ifm_status = IFM_AVALID;
 	ifmr->ifm_active = IFM_ETHER;
-	/*XXX fix this */
-	if (0) {
-		ifmr->ifm_status |= IFM_ACTIVE;
-		ifmr->ifm_active |= IFM_UNKNOWN | IFM_FDX;
+
+	if (!apc->port_is_up) {
+		MANA_APC_LOCK_UNLOCK(apc);
+		mana_trc_info(NULL, "Port %u link is down\n", apc->port_idx);
+		return;
 	}
+
+	ifmr->ifm_status |= IFM_ACTIVE;
+	ifmr->ifm_active |= IFM_UNKNOWN | IFM_FDX;
+
+	MANA_APC_LOCK_UNLOCK(apc);
 }
 
 static uint64_t
@@ -155,7 +170,7 @@ mana_init_port_context(struct mana_port_context *apc)
 	apc->rxqs = mallocarray(apc->num_queues, sizeof(struct mana_rxq *),
 	    M_DEVBUF, M_WAITOK | M_ZERO);
 
-	return !apc->rxqs ? ENOMEM : 0;
+	return (!apc->rxqs ? ENOMEM : 0);
 }
 
 static int
@@ -356,6 +371,8 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 	apc->port_handle = INVALID_MANA_HANDLE;
 	apc->port_idx = port_idx;
 
+	MANA_APC_LOCK_INIT(apc);
+
 	/* XXX name */
 	if_initname(ndev, device_get_name(gc->dev), port_idx);
 	if_setdev(ndev,gc->dev);
@@ -474,18 +491,18 @@ out:
 void
 mana_remove(struct gdma_dev *gd)
 {
-	// struct gdma_context *gc = gd->gdma_context;
+	struct gdma_context *gc = gd->gdma_context;
 	struct mana_context *ac = gd->driver_data;
-#if 0
+#if 1
 	device_t dev = gc->dev;
-	struct net_device *ndev;
+	struct ifnet *ndev;
 	int i;
 
 	for (i = 0; i < ac->num_ports; i++) {
 		ndev = ac->ports[i];
 		if (!ndev) {
 			if (i == 0)
-				dev_err(dev, "No net device to remove\n");
+				device_printf(dev, "No net device to remove\n");
 			goto out;
 		}
 

@@ -399,6 +399,8 @@ struct mana_port_context {
 	struct ifnet		*ndev;
 	struct ifmedia		media;
 
+	struct sx		apc_lock;
+
 	uint8_t			mac_addr[ETHER_ADDR_LEN];
 
 	struct mana_eq		*eqs;
@@ -436,6 +438,12 @@ struct mana_port_context {
 
 	struct mana_ethtool_stats eth_stats;
 };
+
+#define MANA_APC_LOCK_INIT(apc)			\
+	sx_init(&(apc)->apc_lock, "MANA port lock")
+#define MANA_APC_LOCK_DESTROY(apc)		sx_destroy(&(apc)->apc_lock)
+#define MANA_APC_LOCK_LOCK(apc)			sx_xlock(&(apc)->apc_lock)
+#define MANA_APC_LOCK_UNLOCK(apc)		sx_unlock(&(apc)->apc_lock)
 
 int mana_config_rss(struct mana_port_context *ac, enum TRI_STATE rx,
     bool update_hash, bool update_tab);
