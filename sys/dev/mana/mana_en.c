@@ -358,7 +358,7 @@ mana_up(struct mana_port_context *apc)
 	/* Ensure port state updated before txq state */
 	wmb();
 
-#if 0
+#if 1
 	if_link_state_change(apc->ndev, LINK_STATE_UP);
 	if_setdrvflagbits(apc->ndev, IFF_DRV_RUNNING, IFF_DRV_OACTIVE);
 #endif
