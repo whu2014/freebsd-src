@@ -340,9 +340,9 @@ struct gdma_queue {
 
 			uint32_t		log2_throttle_limit;
 
-#if 0 /*XXX */
-			/* NAPI data */
-			struct napi_struct napi;
+#if 1 /*XXX */
+			struct task		cleanup_task;
+			struct taskqueue	*cleanup_tq;
 #endif
 			int			work_done;
 			int			budget;

@@ -306,6 +306,71 @@ mana_query_vport_cfg(struct mana_port_context *apc, uint32_t vport_index,
 	return 0;
 }
 
+static void
+mana_init_cqe_poll_buf(struct gdma_comp *cqe_poll_buf)
+{
+	int i;
+
+	for (i = 0; i < CQE_POLLING_BUFFER; i++)
+		memset(&cqe_poll_buf[i], 0, sizeof(struct gdma_comp));
+}
+
+static void mana_destroy_eq(struct gdma_context *gc,
+			    struct mana_port_context *apc)
+{
+	struct gdma_queue *eq;
+	int i;
+
+	if (!apc->eqs)
+		return;
+
+	for (i = 0; i < apc->num_queues; i++) {
+		eq = apc->eqs[i].eq;
+		if (!eq)
+			continue;
+
+		mana_gd_destroy_queue(gc, eq);
+	}
+
+	kfree(apc->eqs);
+	apc->eqs = NULL;
+}
+
+static int
+mana_create_eq(struct mana_port_context *apc)
+{
+	struct gdma_dev *gd = apc->ac->gdma_dev;
+	struct gdma_queue_spec spec = {};
+	int err;
+	int i;
+
+	apc->eqs = mallocarry(apc->num_queues, sizeof(struct mana_eq),
+	    M_DEVBUF, M_WAITOK | M_ZERO);
+	if (!apc->eqs)
+		return ENOMEM;
+
+	spec.type = GDMA_EQ;
+	spec.monitor_avl_buf = false;
+	spec.queue_size = EQ_SIZE;
+	spec.eq.callback = NULL;
+	spec.eq.context = apc->eqs;
+	spec.eq.log2_throttle_limit = LOG2_EQ_THROTTLE;
+	spec.eq.ndev = apc->ndev;
+
+	for (i = 0; i < apc->num_queues; i++) {
+		mana_init_cqe_poll_buf(apc->eqs[i].cqe_poll);
+
+		err = mana_gd_create_mana_eq(gd, &spec, &apc->eqs[i].eq);
+		if (err)
+			goto out;
+	}
+
+	return 0;
+out:
+	mana_destroy_eq(gd->gdma_context, apc);
+	return err;
+}
+
 static int
 mana_init_port(struct ifnet *ndev)
 {
@@ -340,6 +405,50 @@ mana_init_port(struct ifnet *ndev)
 reset_apc:
 	free(apc->rxqs, M_DEVBUF);
 	apc->rxqs = NULL;
+	return err;
+}
+
+int
+mana_alloc_queues(struct ifnet *ndev)
+{
+	struct mana_port_context *apc = netdev_priv(ndev);
+	struct gdma_dev *gd = apc->ac->gdma_dev;
+	int err;
+
+	err = mana_create_eq(apc);
+	if (err)
+		return err;
+
+	err = mana_create_vport(apc, ndev);
+	if (err)
+		goto destroy_eq;
+
+	err = netif_set_real_num_tx_queues(ndev, apc->num_queues);
+	if (err)
+		goto destroy_vport;
+
+	err = mana_add_rx_queues(apc, ndev);
+	if (err)
+		goto destroy_vport;
+
+	apc->rss_state = apc->num_queues > 1 ? TRI_STATE_TRUE : TRI_STATE_FALSE;
+
+	err = netif_set_real_num_rx_queues(ndev, apc->num_queues);
+	if (err)
+		goto destroy_vport;
+
+	mana_rss_table_init(apc);
+
+	err = mana_config_rss(apc, TRI_STATE_TRUE, true, true);
+	if (err)
+		goto destroy_vport;
+
+	return 0;
+
+destroy_vport:
+	mana_destroy_vport(apc);
+destroy_eq:
+	mana_destroy_eq(gd->gdma_context, apc);
 	return err;
 }
 

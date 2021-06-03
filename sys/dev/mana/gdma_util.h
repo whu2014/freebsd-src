@@ -86,6 +86,7 @@ extern int mana_log_level;
 #define BIT(n)			(1ULL << (n))
 
 #define PHYS_PFN(x)		((unsigned long)((x) >> PAGE_SHIFT))
+#define offset_in_page(x)	((x) & PAGE_MASK)
 
 #define min_t(type, _x, _y)						\
     ((type)(_x) < (type)(_y) ? (type)(_x) : (type)(_y))
@@ -172,6 +173,12 @@ static inline unsigned long
 roundup_pow_of_two(unsigned long x)
 {
 	return (1UL << flsl(x - 1));
+}
+
+static inline int
+is_power_of_2(unsigned long n)
+{
+	return (n == roundup_pow_of_two(n));
 }
 
 struct completion {
