@@ -40,6 +40,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/mbuf.h>
 #include <sys/smp.h>
 #include <sys/socket.h>
+#include <sys/sockio.h>
 #include <sys/sysctl.h>
 #include <sys/taskqueue.h>
 #include <sys/time.h>
@@ -137,7 +138,7 @@ mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 	//struct ifreq *ifr = (struct ifreq *)data;
 	int rc = 0;
 
-#if 0
+#if 1
 	switch (command) {
 	case SIOCSIFMTU:
 	case SIOCSIFFLAGS:
