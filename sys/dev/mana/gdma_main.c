@@ -703,7 +703,7 @@ mana_gd_register_irq(struct gdma_queue *queue,
 
 	if (unlikely(msi_index >= gc->num_msix_usable)) {
 		device_printf(gc->dev,
-		    "chose and invalid msix index %d, usable %d\n",
+		    "chose an invalid msix index %d, usable %d\n",
 		    msi_index, gc->num_msix_usable);
 		return ENOSPC;
 	}

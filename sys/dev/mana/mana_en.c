@@ -306,6 +306,44 @@ mana_query_vport_cfg(struct mana_port_context *apc, uint32_t vport_index,
 	return 0;
 }
 
+static int
+mana_cfg_vport(struct mana_port_context *apc, uint32_t protection_dom_id,
+    uint32_t doorbell_pg_id)
+{
+	struct mana_config_vport_resp resp = {};
+	struct mana_config_vport_req req = {};
+	int err;
+
+	mana_gd_init_req_hdr(&req.hdr, MANA_CONFIG_VPORT_TX,
+	    sizeof(req), sizeof(resp));
+	req.vport = apc->port_handle;
+	req.pdid = protection_dom_id;
+	req.doorbell_pageid = doorbell_pg_id;
+
+	err = mana_send_request(apc->ac, &req, sizeof(req), &resp,
+	    sizeof(resp));
+	if (err) {
+		if_printf(apc->ndev, "Failed to configure vPort: %d\n", err);
+		goto out;
+	}
+
+	err = mana_verify_resp_hdr(&resp.hdr, MANA_CONFIG_VPORT_TX,
+	    sizeof(resp));
+	if (err || resp.hdr.status) {
+		if_printf(apc->ndev, "Failed to configure vPort: %d, 0x%x\n",
+		    err, resp.hdr.status);
+		if (!err)
+			err = EPROTO;
+
+		goto out;
+	}
+
+	apc->tx_shortform_allowed = resp.short_form_allowed;
+	apc->tx_vp_offset = resp.tx_vport_offset;
+out:
+	return err;
+}
+
 static void
 mana_init_cqe_poll_buf(struct gdma_comp *cqe_poll_buf)
 {
@@ -315,8 +353,8 @@ mana_init_cqe_poll_buf(struct gdma_comp *cqe_poll_buf)
 		memset(&cqe_poll_buf[i], 0, sizeof(struct gdma_comp));
 }
 
-static void mana_destroy_eq(struct gdma_context *gc,
-			    struct mana_port_context *apc)
+static void
+mana_destroy_eq(struct gdma_context *gc, struct mana_port_context *apc)
 {
 	struct gdma_queue *eq;
 	int i;
@@ -332,7 +370,7 @@ static void mana_destroy_eq(struct gdma_context *gc,
 		mana_gd_destroy_queue(gc, eq);
 	}
 
-	kfree(apc->eqs);
+	free(apc->eqs, M_DEVBUF);
 	apc->eqs = NULL;
 }
 
@@ -369,6 +407,134 @@ mana_create_eq(struct mana_port_context *apc)
 out:
 	mana_destroy_eq(gd->gdma_context, apc);
 	return err;
+}
+
+static int
+mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
+{
+	struct gdma_dev *gd = apc->ac->gdma_dev;
+	struct mana_obj_spec wq_spec;
+	struct mana_obj_spec cq_spec;
+	struct gdma_queue_spec spec;
+	struct gdma_context *gc;
+	struct mana_txq *txq;
+	struct mana_cq *cq;
+	u32 txq_size;
+	u32 cq_size;
+	int err;
+	int i;
+
+	apc->tx_qp = kcalloc(apc->num_queues, sizeof(struct mana_tx_qp),
+			     GFP_KERNEL);
+	if (!apc->tx_qp)
+		return -ENOMEM;
+
+	/*  The minimum size of the WQE is 32 bytes, hence
+	 *  MAX_SEND_BUFFERS_PER_QUEUE represents the maximum number of WQEs
+	 *  the SQ can store. This value is then used to size other queues
+	 *  to prevent overflow.
+	 */
+	txq_size = MAX_SEND_BUFFERS_PER_QUEUE * 32;
+	BUILD_BUG_ON(!PAGE_ALIGNED(txq_size));
+
+	cq_size = MAX_SEND_BUFFERS_PER_QUEUE * COMP_ENTRY_SIZE;
+	cq_size = PAGE_ALIGN(cq_size);
+
+	gc = gd->gdma_context;
+
+	for (i = 0; i < apc->num_queues; i++) {
+		apc->tx_qp[i].tx_object = INVALID_MANA_HANDLE;
+
+		/* Create SQ */
+		txq = &apc->tx_qp[i].txq;
+
+		u64_stats_init(&txq->stats.syncp);
+		txq->ndev = net;
+		txq->net_txq = netdev_get_tx_queue(net, i);
+		txq->vp_offset = apc->tx_vp_offset;
+		skb_queue_head_init(&txq->pending_skbs);
+
+		memset(&spec, 0, sizeof(spec));
+		spec.type = GDMA_SQ;
+		spec.monitor_avl_buf = true;
+		spec.queue_size = txq_size;
+		err = mana_gd_create_mana_wq_cq(gd, &spec, &txq->gdma_sq);
+		if (err)
+			goto out;
+
+		/* Create SQ's CQ */
+		cq = &apc->tx_qp[i].tx_cq;
+		cq->gdma_comp_buf = apc->eqs[i].cqe_poll;
+		cq->type = MANA_CQ_TYPE_TX;
+
+		cq->txq = txq;
+
+		memset(&spec, 0, sizeof(spec));
+		spec.type = GDMA_CQ;
+		spec.monitor_avl_buf = false;
+		spec.queue_size = cq_size;
+		spec.cq.callback = mana_cq_handler;
+		spec.cq.parent_eq = apc->eqs[i].eq;
+		spec.cq.context = cq;
+		err = mana_gd_create_mana_wq_cq(gd, &spec, &cq->gdma_cq);
+		if (err)
+			goto out;
+
+		memset(&wq_spec, 0, sizeof(wq_spec));
+		memset(&cq_spec, 0, sizeof(cq_spec));
+
+		wq_spec.gdma_region = txq->gdma_sq->mem_info.gdma_region;
+		wq_spec.queue_size = txq->gdma_sq->queue_size;
+
+		cq_spec.gdma_region = cq->gdma_cq->mem_info.gdma_region;
+		cq_spec.queue_size = cq->gdma_cq->queue_size;
+		cq_spec.modr_ctx_id = 0;
+		cq_spec.attached_eq = cq->gdma_cq->cq.parent->id;
+
+		err = mana_create_wq_obj(apc, apc->port_handle, GDMA_SQ,
+					 &wq_spec, &cq_spec,
+					 &apc->tx_qp[i].tx_object);
+
+		if (err)
+			goto out;
+
+		txq->gdma_sq->id = wq_spec.queue_index;
+		cq->gdma_cq->id = cq_spec.queue_index;
+
+		txq->gdma_sq->mem_info.gdma_region = GDMA_INVALID_DMA_REGION;
+		cq->gdma_cq->mem_info.gdma_region = GDMA_INVALID_DMA_REGION;
+
+		txq->gdma_txq_id = txq->gdma_sq->id;
+
+		cq->gdma_id = cq->gdma_cq->id;
+
+		if (WARN_ON(cq->gdma_id >= gc->max_num_cqs))
+			return -EINVAL;
+
+		gc->cq_table[cq->gdma_id] = cq->gdma_cq;
+
+		mana_gd_arm_cq(cq->gdma_cq);
+	}
+
+	return 0;
+out:
+	mana_destroy_txq(apc);
+	return err;
+}
+
+static int
+mana_create_vport(struct mana_port_context *apc, struct ifnet *net)
+{
+	struct gdma_dev *gd = apc->ac->gdma_dev;
+	int err;
+
+	apc->default_rxobj = INVALID_MANA_HANDLE;
+
+	err = mana_cfg_vport(apc, gd->pdid, gd->doorbell);
+	if (err)
+		return err;
+
+	return mana_create_txq(apc, net);
 }
 
 static int

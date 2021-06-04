@@ -142,8 +142,8 @@ struct mana_txq {
 	struct sk_buff_head pending_skbs;
 	struct netdev_queue *net_txq;
 
-	atomic_t pending_sends;
 #endif
+	atomic_t pending_sends;
 
 	struct mana_stats stats;
 };
