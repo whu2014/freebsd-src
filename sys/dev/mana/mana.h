@@ -143,9 +143,20 @@ struct mana_txq {
 	struct netdev_queue *net_txq;
 
 #endif
-	atomic_t pending_sends;
+	/* The mbufs are sent to the HW and we are waiting for the CQEs. */
+	uint16_t		next_to_use;
+	uint16_t		next_to_complete;
 
-	struct mana_stats stats;
+	atomic_t		pending_sends;
+
+	struct buf_ring		*txq_br;
+	struct mtx		txq_mtx;
+	char			txq_mtx_name[16];
+
+	struct task		enqueue_task;
+	struct taskqueue	*enqueue_tq;
+
+	struct mana_stats	stats;
 };
 
 

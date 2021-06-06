@@ -1123,6 +1123,52 @@ free_q:
 	return err;
 }
 
+int mana_gd_create_mana_wq_cq(struct gdma_dev *gd,
+    const struct gdma_queue_spec *spec,
+    struct gdma_queue **queue_ptr)
+{
+	struct gdma_context *gc = gd->gdma_context;
+	struct gdma_mem_info *gmi;
+	struct gdma_queue *queue;
+	int err;
+
+	if (spec->type != GDMA_CQ && spec->type != GDMA_SQ &&
+	    spec->type != GDMA_RQ)
+		return EINVAL;
+
+	queue = malloc(sizeof(*queue), M_DEVBUF, M_WAITOK | M_ZERO);
+	if (!queue)
+		return ENOMEM;
+
+	gmi = &queue->mem_info;
+	err = mana_gd_alloc_memory(gc, spec->queue_size, gmi);
+	if (err)
+		goto free_q;
+
+	err = mana_gd_create_dma_region(gd, gmi);
+	if (err)
+		goto out;
+
+	queue->head = 0;
+	queue->tail = 0;
+	queue->queue_mem_ptr = gmi->virt_addr;
+	queue->queue_size = spec->queue_size;
+	queue->monitor_avl_buf = spec->monitor_avl_buf;
+	queue->type = spec->type;
+	queue->gdma_dev = gd;
+
+	if (spec->type == GDMA_CQ)
+		mana_gd_create_cq(spec, queue);
+
+	*queue_ptr = queue;
+	return 0;
+out:
+	mana_gd_free_memory(gmi);
+free_q:
+	kfree(queue);
+	return err;
+}
+
 void
 mana_gd_destroy_queue(struct gdma_context *gc, struct gdma_queue *queue)
 {

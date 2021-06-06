@@ -344,6 +344,89 @@ out:
 	return err;
 }
 
+static int
+mana_create_wq_obj(struct mana_port_context *apc,
+    mana_handle_t vport,
+    uint32_t wq_type, struct mana_obj_spec *wq_spec,
+    struct mana_obj_spec *cq_spec,
+    mana_handle_t *wq_obj)
+{
+	struct mana_create_wqobj_resp resp = {};
+	struct mana_create_wqobj_req req = {};
+	struct ifnet *ndev = apc->ndev;
+	int err;
+
+	mana_gd_init_req_hdr(&req.hdr, MANA_CREATE_WQ_OBJ,
+	    sizeof(req), sizeof(resp));
+	req.vport = vport;
+	req.wq_type = wq_type;
+	req.wq_gdma_region = wq_spec->gdma_region;
+	req.cq_gdma_region = cq_spec->gdma_region;
+	req.wq_size = wq_spec->queue_size;
+	req.cq_size = cq_spec->queue_size;
+	req.cq_moderation_ctx_id = cq_spec->modr_ctx_id;
+	req.cq_parent_qid = cq_spec->attached_eq;
+
+	err = mana_send_request(apc->ac, &req, sizeof(req), &resp,
+	    sizeof(resp));
+	if (err) {
+		if_printf(ndev, "Failed to create WQ object: %d\n", err);
+		goto out;
+	}
+
+	err = mana_verify_resp_hdr(&resp.hdr, MANA_CREATE_WQ_OBJ,
+	    sizeof(resp));
+	if (err || resp.hdr.status) {
+		if_printf(ndev, "Failed to create WQ object: %d, 0x%x\n", err,
+		    resp.hdr.status);
+		if (!err)
+			err = EPROTO;
+		goto out;
+	}
+
+	if (resp.wq_obj == INVALID_MANA_HANDLE) {
+		if_printf(ndev, "Got an invalid WQ object handle\n");
+		err = EPROTO;
+		goto out;
+	}
+
+	*wq_obj = resp.wq_obj;
+	wq_spec->queue_index = resp.wq_id;
+	cq_spec->queue_index = resp.cq_id;
+
+	return 0;
+out:
+	return err;
+}
+
+static void
+mana_destroy_wq_obj(struct mana_port_context *apc, uint32_t wq_type,
+    mana_handle_t wq_obj)
+{
+	struct mana_destroy_wqobj_resp resp = {};
+	struct mana_destroy_wqobj_req req = {};
+	struct ifnet *ndev = apc->ndev;
+	int err;
+
+	mana_gd_init_req_hdr(&req.hdr, MANA_DESTROY_WQ_OBJ,
+	    sizeof(req), sizeof(resp));
+	req.wq_type = wq_type;
+	req.wq_obj_handle = wq_obj;
+
+	err = mana_send_request(apc->ac, &req, sizeof(req), &resp,
+	    sizeof(resp));
+	if (err) {
+		if_printf(ndev, "Failed to destroy WQ object: %d\n", err);
+		return;
+	}
+
+	err = mana_verify_resp_hdr(&resp.hdr, MANA_DESTROY_WQ_OBJ,
+	    sizeof(resp));
+	if (err || resp.hdr.status)
+		if_printf(ndev, "Failed to destroy WQ object: %d, 0x%x\n",
+		    err, resp.hdr.status);
+}
+
 static void
 mana_init_cqe_poll_buf(struct gdma_comp *cqe_poll_buf)
 {
@@ -409,6 +492,57 @@ out:
 	return err;
 }
 
+static void
+mana_deinit_cq(struct mana_port_context *apc, struct mana_cq *cq)
+{
+	struct gdma_dev *gd = apc->ac->gdma_dev;
+
+	if (!cq->gdma_cq)
+		return;
+
+	mana_gd_destroy_queue(gd->gdma_context, cq->gdma_cq);
+}
+
+static void
+mana_deinit_txq(struct mana_port_context *apc, struct mana_txq *txq)
+{
+	struct gdma_dev *gd = apc->ac->gdma_dev;
+
+	if (!txq->gdma_sq)
+		return;
+
+	/*XXX Flush buf ring here? */
+	if (txq->txq_br)
+		buf_ring_free(txq->txq_br, M_DEVBUF);
+
+	/*XXX drain taskqueue here? */
+	if (txq->enqueue_tq)
+		 taskqueue_free(txq->enqueue_tq);
+
+	mana_gd_destroy_queue(gd->gdma_context, txq->gdma_sq);
+
+	mtx_destroy(&txq->txq_mtx);
+}
+
+static void mana_destroy_txq(struct mana_port_context *apc)
+{
+	int i;
+
+	if (!apc->tx_qp)
+		return;
+
+	for (i = 0; i < apc->num_queues; i++) {
+		mana_destroy_wq_obj(apc, GDMA_SQ, apc->tx_qp[i].tx_object);
+
+		mana_deinit_cq(apc, &apc->tx_qp[i].tx_cq);
+
+		mana_deinit_txq(apc, &apc->tx_qp[i].txq);
+	}
+
+	kfree(apc->tx_qp);
+	apc->tx_qp = NULL;
+}
+
 static int
 mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
 {
@@ -419,15 +553,15 @@ mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
 	struct gdma_context *gc;
 	struct mana_txq *txq;
 	struct mana_cq *cq;
-	u32 txq_size;
-	u32 cq_size;
+	uint32_t txq_size;
+	uint32_t cq_size;
 	int err;
 	int i;
 
-	apc->tx_qp = kcalloc(apc->num_queues, sizeof(struct mana_tx_qp),
-			     GFP_KERNEL);
+	apc->tx_qp = mallocarray(apc->num_queues, sizeof(struct mana_tx_qp),
+	    M_DEVBUF, M_WAITOK | M_ZERO);
 	if (!apc->tx_qp)
-		return -ENOMEM;
+		return ENOMEM;
 
 	/*  The minimum size of the WQE is 32 bytes, hence
 	 *  MAX_SEND_BUFFERS_PER_QUEUE represents the maximum number of WQEs
@@ -435,10 +569,10 @@ mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
 	 *  to prevent overflow.
 	 */
 	txq_size = MAX_SEND_BUFFERS_PER_QUEUE * 32;
-	BUILD_BUG_ON(!PAGE_ALIGNED(txq_size));
+	CTASSERT(IS_ALIGNED(txq_size, PAGE_SIZE));
 
 	cq_size = MAX_SEND_BUFFERS_PER_QUEUE * COMP_ENTRY_SIZE;
-	cq_size = PAGE_ALIGN(cq_size);
+	cq_size = ALIGN(cq_size, PAGE_SIZE);
 
 	gc = gd->gdma_context;
 
@@ -448,9 +582,9 @@ mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
 		/* Create SQ */
 		txq = &apc->tx_qp[i].txq;
 
-		u64_stats_init(&txq->stats.syncp);
+		// u64_stats_init(&txq->stats.syncp);
 		txq->ndev = net;
-		txq->net_txq = netdev_get_tx_queue(net, i);
+		// txq->net_txq = netdev_get_tx_queue(net, i);
 		txq->vp_offset = apc->tx_vp_offset;
 		skb_queue_head_init(&txq->pending_skbs);
 
@@ -492,8 +626,7 @@ mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
 		cq_spec.attached_eq = cq->gdma_cq->cq.parent->id;
 
 		err = mana_create_wq_obj(apc, apc->port_handle, GDMA_SQ,
-					 &wq_spec, &cq_spec,
-					 &apc->tx_qp[i].tx_object);
+		    &wq_spec, &cq_spec, &apc->tx_qp[i].tx_object);
 
 		if (err)
 			goto out;
@@ -508,10 +641,38 @@ mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
 
 		cq->gdma_id = cq->gdma_cq->id;
 
-		if (WARN_ON(cq->gdma_id >= gc->max_num_cqs))
-			return -EINVAL;
+		if (cq->gdma_id >= gc->max_num_cqs) {
+			if_printf(net, "CQ id %u too large.\n", cq->gdma_id);
+			return EINVAL;
+		}
 
 		gc->cq_table[cq->gdma_id] = cq->gdma_cq;
+
+		/* Initialize tx specific data */
+		snprintf(txq->txq_mtx_name, nitems(txq->txq_mtx_name),
+		    "mana:tx(%d)", i);
+		mtx_init(&txq->txq_mtx, txq->txq_mtx_name, NULL< MTX_DEF);
+
+		txq->txq_br = buf_ring_alloc(MAX_SEND_BUFFERS_PER_QUEUE,
+		    M_DEVBUF, M_WAITOK, &txq->txq_mtx);
+		if (unlikely(txq->txq_br == NULL)) {
+			if_printf(net,
+			    "Failed to allocate buf ring for CQ %u\n",
+			    cq->gdma_id);
+			err = ENOMEM;
+			goto out;
+		}
+
+		/* Allocate taskqueue for deferred send */
+		TASK_INIT(&txq->enqueue_task, 0, mana_xmit_taskfunc, txq);
+		txq->enqueue_tq = taskqueue_create_fast("mana_tx_enque",
+		    M_NOWAIT, taskqueue_thread_enqueue, &txq->enqueue_tq);
+		if (unlikely(txq->enqueue_tq == NULL)) {
+			if_printf(net,
+			    "Unable to create tx %d enqueue task queue\n", i);
+			err = ENOMEM;
+			goto out;
+		}
 
 		mana_gd_arm_cq(cq->gdma_cq);
 	}
