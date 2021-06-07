@@ -344,8 +344,10 @@ struct mana_recv_buf_oob {
 	/* A valid GDMA work request representing the data buffer. */
 	struct gdma_wqe_request		wqe_req;
 
-	void				*buf_va;
-	bus_addr_t			buf_dma_addr;
+	//void				*buf_va;	/* Virtual addr */
+	//bus_addr_t			buf_dma_addr;	/* Physical addr */
+	struct mbuf			*mbuf;
+	bus_dmamap_t			dma_map;
 
 	/* SGL of the buffer going to be sent as part of the work request. */
 	uint32_t			num_sge;
@@ -414,6 +416,9 @@ struct mana_port_context {
 	struct ifmedia		media;
 
 	struct sx		apc_lock;
+
+	/* DMA tag used for queue bufs of the entire port */
+	bus_dma_tag_t		rx_buf_tag;
 
 	uint8_t			mac_addr[ETHER_ADDR_LEN];
 

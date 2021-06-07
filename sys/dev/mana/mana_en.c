@@ -151,6 +151,68 @@ mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 	return (rc);
 }
 
+static inline int
+mana_alloc_rx_mbuf(struct mana_port_context *apc, mana_rxq *rxq,
+    struct mana_recv_buf_oob *rx_oob)
+{
+	bus_dma_segment_t segs[1];
+	int nsegs, err;
+	uint32_t mlen;
+
+	/* If previously allocated mbuf exists */
+	if (unlikely(rx_oob->mbuf))
+		return 0;
+
+	rx_oob->mbuf = m_getjcl(M_NOWAIT, MT_DATA, M_PKTHDR,
+	    rxq->datasize);
+	if (unlikely(rx_oob->mbuf == NULL)) {
+		rx_info->mbuf = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+		if (unlikely(rx_oob->mbuf == NULL)) {
+			return ENOMEM;
+		}
+		mlen = MCLBYTES;
+	} else {
+		mlen = rxq->datasize;
+	}
+
+	rx_oob->mbuf->m_pkthdr.len = rx_oob->mbuf->m_len = mlen;
+
+	err = bus_dmamap_load_mbuf_sg(apc->rx_buf_tag, rx_oob->dma_map,
+	    rx_oob->mbuf, segs, &nsegs, BUS_DMA_NOWAIT);
+
+	if (unlikely((err != 0) || (nsegs != 1))) {
+		mana_trc_dbg(NULL, "Failed to map mbuf, error: %d, "
+		    "nsegs: %d\n", err, nsegs);
+		goto error.
+	}
+
+	bus_dmamap_sync(apc->rx_buf_tag, rx_oob->dma_map,
+	    BUS_DMASYNC_PREREAD);
+
+	rx_oob->num_sge = 1;
+	rx_oob->sgl[0].address = segs[0].ds_addr;
+	rx_oob->sgl[0].size = mlen;
+	rx_oob->sgl[0].mem_key = apc->ac->gdma_dev->gpa_mkey;
+
+	return 0;
+
+error:
+	m_freem(rx_oob->mbuf);
+	rx_oob->mbuf = NULL;
+	return EFAULT;
+}
+
+static void
+mana_free_rx_mbuf(struct mana_port_context *apc, mana_rxq *rxq,
+    struct mana_recv_buf_oob *rx_oob)
+{
+	bus_dmamap_sync(apc->rx_buf_tag, rx_oob->dma_map,
+	    BUS_DMASYNC_POSTREAD);
+	bus_dmamap_unload((apc->rx_buf_tag, rx_oob->dma_map);
+	m_freem(rx_oob->mbuf);
+	rx_oob->mbuf = NULL;
+}
+
 static int
 mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 {
@@ -163,6 +225,9 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 static void
 mana_cleanup_port_context(struct mana_port_context *apc)
 {
+	bus_dma_tag_destroy(apc->rx_buf_tag);
+	apc->rx_buf_tag = NULL;
+
 	free(apc->rxqs, M_DEVBUF);
 	apc->rxqs = NULL;
 }
@@ -170,10 +235,36 @@ mana_cleanup_port_context(struct mana_port_context *apc)
 static int
 mana_init_port_context(struct mana_port_context *apc)
 {
+	device_t dev = apc->ac->gdma_dev->gdma_context->dev;
+	int err;
+
+	/* Create DMA tag for rx bufs */
+	err = bus_dma_tag_create(bus_get_dma_tag(dev),	/* parent */
+	    64, 0,			/* alignment, boundary	*/
+	    BUS_SPACE_MAXADDR,		/* lowaddr		*/
+	    BUS_SPACE_MAXADDR,		/* highaddr		*/
+	    NULL, NULL,			/* filter, filterarg	*/
+	    MJUMPAGESIZE,		/* maxsize		*/
+	    1,				/* nsegments		*/
+	    MJUMPAGESIZE,		/* maxsegsize		*/
+	    0,				/* flags		*/
+	    NULL, NULL,			/* lockfunc, lockfuncarg*/
+	    &apc->rx_buf_tag);
+	if (unlikely(err)) {
+		device_printf(dev, "Feiled to create RX DMA tag\n");
+		return err;
+	}
+
 	apc->rxqs = mallocarray(apc->num_queues, sizeof(struct mana_rxq *),
 	    M_DEVBUF, M_WAITOK | M_ZERO);
 
-	return (!apc->rxqs ? ENOMEM : 0);
+	if (!apc->rxqs) {
+		bus_dma_tag_destroy(apc->rx_buf_tag);
+		apc->rx_buf_tag = NULL;
+		return ENOMEM;
+	}
+
+	return 0;
 }
 
 static int
@@ -341,6 +432,71 @@ mana_cfg_vport(struct mana_port_context *apc, uint32_t protection_dom_id,
 	apc->tx_shortform_allowed = resp.short_form_allowed;
 	apc->tx_vp_offset = resp.tx_vport_offset;
 out:
+	return err;
+}
+
+static int
+mana_cfg_vport_steering(struct mana_port_context *apc,
+    enum TRI_STATE rx,
+    bool update_default_rxobj, bool update_key,
+    bool update_tab)
+{
+	uint16_t num_entries = MANA_INDIRECT_TABLE_SIZE;
+	struct mana_cfg_rx_steer_req *req = NULL;
+	struct mana_cfg_rx_steer_resp resp = {};
+	struct ifnet *ndev = apc->ndev;
+	mana_handle_t *req_indir_tab;
+	uiint32_t req_buf_size;
+	int err;
+
+	req_buf_size = sizeof(*req) + sizeof(mana_handle_t) * num_entries;
+	req = malloc(req_buf_size, M_DEVBUF, M_WAITOK | M_ZERO);
+	if (!req)
+		return ENOMEM;
+
+	mana_gd_init_req_hdr(&req->hdr, MANA_CONFIG_VPORT_RX, req_buf_size,
+	    sizeof(resp));
+
+	req->vport = apc->port_handle;
+	req->num_indir_entries = num_entries;
+	req->indir_tab_offset = sizeof(*req);
+	req->rx_enable = rx;
+	req->rss_enable = apc->rss_state;
+	req->update_default_rxobj = update_default_rxobj;
+	req->update_hashkey = update_key;
+	req->update_indir_tab = update_tab;
+	req->default_rxobj = apc->default_rxobj;
+
+	if (update_key)
+		memcpy(&req->hashkey, apc->hashkey, MANA_HASH_KEY_SIZE);
+
+	if (update_tab) {
+		req_indir_tab = (mana_handle_t *)(req + 1);
+		memcpy(req_indir_tab, apc->rxobj_table,
+		       req->num_indir_entries * sizeof(mana_handle_t));
+	}
+
+	err = mana_send_request(apc->ac, req, req_buf_size, &resp,
+	    sizeof(resp));
+	if (err) {
+		if_printf(ndev, "Failed to configure vPort RX: %d\n", err);
+		goto out;
+	}
+
+	err = mana_verify_resp_hdr(&resp.hdr, MANA_CONFIG_VPORT_RX,
+	    sizeof(resp));
+	if (err) {
+		if_printf(ndev, "vPort RX configuration failed: %d\n", err);
+		goto out;
+	}
+
+	if (resp.hdr.status) {
+		if_printf(ndev, "vPort RX configuration failed: 0x%x\n",
+		    resp.hdr.status);
+		err = EPROTO;
+	}
+out:
+	free(req, M_DEVBUF);
 	return err;
 }
 
@@ -524,7 +680,8 @@ mana_deinit_txq(struct mana_port_context *apc, struct mana_txq *txq)
 	mtx_destroy(&txq->txq_mtx);
 }
 
-static void mana_destroy_txq(struct mana_port_context *apc)
+static void
+mana_destroy_txq(struct mana_port_context *apc)
 {
 	int i;
 
@@ -539,7 +696,7 @@ static void mana_destroy_txq(struct mana_port_context *apc)
 		mana_deinit_txq(apc, &apc->tx_qp[i].txq);
 	}
 
-	kfree(apc->tx_qp);
+	free(apc->tx_qp, M_DEVBUF);
 	apc->tx_qp = NULL;
 }
 
@@ -683,6 +840,274 @@ out:
 	return err;
 }
 
+static void
+mana_destroy_rxq(struct mana_port_context *apc, struct mana_rxq *rxq,
+    bool validate_state)
+{
+	struct gdma_context *gc = apc->ac->gdma_dev->gdma_context;
+	struct mana_recv_buf_oob *rx_oob;
+	struct device *dev = gc->dev;
+	int i;
+
+	if (!rxq)
+		return;
+
+	if (validate_state) {
+		// XXX mana_napi_sync_for_rx(rxq); should we flush and stor Q here?
+		;
+	}
+
+	mana_destroy_wq_obj(apc, GDMA_RQ, rxq->rxobj);
+
+	mana_deinit_cq(apc, &rxq->rx_cq);
+
+	for (i = 0; i < rxq->num_rx_buf; i++) {
+		rx_oob = &rxq->rx_oobs[i];
+
+		if (!rx_oob->mbuf)
+			continue;
+
+		mana_free_rx_mbuf(apc, rxq, rx_oob);
+	}
+
+	if (rxq->gdma_rq)
+		mana_gd_destroy_queue(gc, rxq->gdma_rq);
+
+	free(rxq, M_DEVBUF);
+}
+
+#define MANA_WQE_HEADER_SIZE 16
+#define MANA_WQE_SGE_SIZE 16
+
+static int
+mana_alloc_rx_wqe(struct mana_port_context *apc,
+    struct mana_rxq *rxq, uint32_t *rxq_size, uint32_t *cq_size)
+{
+	struct gdma_context *gc = apc->ac->gdma_dev->gdma_context;
+	struct mana_recv_buf_oob *rx_oob;
+	struct device *dev = gc->dev;
+	struct page *page;
+	uint32_t buf_idx;
+	dma_addr_t da;
+
+	WARN_ON(rxq->datasize == 0 || rxq->datasize > PAGE_SIZE);
+
+	*rxq_size = 0;
+	*cq_size = 0;
+
+	for (buf_idx = 0; buf_idx < rxq->num_rx_buf; buf_idx++) {
+		rx_oob = &rxq->rx_oobs[buf_idx];
+		memset(rx_oob, 0, sizeof(*rx_oob));
+
+		err = bus_dmamap_create(apc->rx_buf_tag, 0,
+		    &rx_oob->dma_map);
+		if (err) {
+			mana_trc_err(NULL,
+			    "Failed to  create rx DMA map for buf %d\n", i);
+			return err;
+		}
+
+		err = mana_alloc_rx_mbuf(apc, rxq, rx_oob);
+		if (err) {
+			mana_trc_err(NULL,
+			    "Failed to  create rx DMA map for buf %d\n", i);
+			bus_dmamap_destroy(apc->rx_buf_tag, rx_oob->dma_map);
+			return err;
+		}
+
+		rx_oob->wqe_req.sgl = rx_oob->sgl;
+		rx_oob->wqe_req.num_sge = rx_oob->num_sge;
+		rx_oob->wqe_req.inline_oob_size = 0;
+		rx_oob->wqe_req.inline_oob_data = NULL;
+		rx_oob->wqe_req.flags = 0;
+		rx_oob->wqe_req.client_data_unit = 0;
+
+		*rxq_size += ALIGN(MANA_WQE_HEADER_SIZE +
+				   MANA_WQE_SGE_SIZE * rx_oob->num_sge, 32);
+		*cq_size += COMP_ENTRY_SIZE;
+	}
+
+	return 0;
+}
+
+static int
+mana_push_wqe(struct mana_rxq *rxq)
+{
+	struct mana_recv_buf_oob *rx_oob;
+	uint32_t buf_idx;
+	int err;
+
+	for (buf_idx = 0; buf_idx < rxq->num_rx_buf; buf_idx++) {
+		rx_oob = &rxq->rx_oobs[buf_idx];
+
+		err = mana_gd_post_and_ring(rxq->gdma_rq, &rx_oob->wqe_req,
+		    &rx_oob->wqe_inf);
+		if (err)
+			return ENOSPC;
+	}
+
+	return 0;
+}
+
+static struct mana_rxq *
+mana_create_rxq(struct mana_port_context *apc, uint32_t rxq_idx,
+    struct mana_eq *eq, struct ifnet *ndev)
+{
+	struct gdma_dev *gd = apc->ac->gdma_dev;
+	struct mana_obj_spec wq_spec;
+	struct mana_obj_spec cq_spec;
+	struct gdma_queue_spec spec;
+	struct mana_cq *cq = NULL;
+	uint32_t cq_size, rq_size;
+	struct gdma_context *gc;
+	struct mana_rxq *rxq;
+	int err;
+
+	gc = gd->gdma_context;
+
+	rxq = malloc(sizeof(*rxq) +
+	    RX_BUFFERS_PER_QUEUE * sizeof(struct mana_recv_buf_oob),
+	    M_DEVBUF, M_WAITOK | M_ZERO);
+	if (!rxq)
+		return NULL;
+
+	rxq->ndev = ndev;
+	rxq->num_rx_buf = RX_BUFFERS_PER_QUEUE;
+	rxq->rxq_idx = rxq_idx;
+	/*
+	 * Minimum size is MCLBYTES(2048) bytes for a mbuf cluster.
+	 * Now we just allow maxium size of 4096.
+	 */
+	// XXX rxq->datasize = ALIGN(MAX_FRAME_SIZE, 64);
+	rxq->datasize = ALIGN(rxq->datasize, MCLBYTES);
+	if (rxq->datasize > 4096)
+		rxq->datasize = 4096;
+
+	rxq->rxobj = INVALID_MANA_HANDLE;
+
+	err = mana_alloc_rx_wqe(apc, rxq, &rq_size, &cq_size);
+	if (err)
+		goto out;
+
+	rq_size = PAGE_ALIGN(rq_size);
+	cq_size = PAGE_ALIGN(cq_size);
+
+	/* Create RQ */
+	memset(&spec, 0, sizeof(spec));
+	spec.type = GDMA_RQ;
+	spec.monitor_avl_buf = true;
+	spec.queue_size = rq_size;
+	err = mana_gd_create_mana_wq_cq(gd, &spec, &rxq->gdma_rq);
+	if (err)
+		goto out;
+
+	/* Create RQ's CQ */
+	cq = &rxq->rx_cq;
+	cq->gdma_comp_buf = eq->cqe_poll;
+	cq->type = MANA_CQ_TYPE_RX;
+	cq->rxq = rxq;
+
+	memset(&spec, 0, sizeof(spec));
+	spec.type = GDMA_CQ;
+	spec.monitor_avl_buf = false;
+	spec.queue_size = cq_size;
+	spec.cq.callback = mana_cq_handler;
+	spec.cq.parent_eq = eq->eq;
+	spec.cq.context = cq;
+	err = mana_gd_create_mana_wq_cq(gd, &spec, &cq->gdma_cq);
+	if (err)
+		goto out;
+
+	memset(&wq_spec, 0, sizeof(wq_spec));
+	memset(&cq_spec, 0, sizeof(cq_spec));
+	wq_spec.gdma_region = rxq->gdma_rq->mem_info.gdma_region;
+	wq_spec.queue_size = rxq->gdma_rq->queue_size;
+
+	cq_spec.gdma_region = cq->gdma_cq->mem_info.gdma_region;
+	cq_spec.queue_size = cq->gdma_cq->queue_size;
+	cq_spec.modr_ctx_id = 0;
+	cq_spec.attached_eq = cq->gdma_cq->cq.parent->id;
+
+	err = mana_create_wq_obj(apc, apc->port_handle, GDMA_RQ,
+	    &wq_spec, &cq_spec, &rxq->rxobj);
+	if (err)
+		goto out;
+
+	rxq->gdma_rq->id = wq_spec.queue_index;
+	cq->gdma_cq->id = cq_spec.queue_index;
+
+	rxq->gdma_rq->mem_info.gdma_region = GDMA_INVALID_DMA_REGION;
+	cq->gdma_cq->mem_info.gdma_region = GDMA_INVALID_DMA_REGION;
+
+	rxq->gdma_id = rxq->gdma_rq->id;
+	cq->gdma_id = cq->gdma_cq->id;
+
+	err = mana_push_wqe(rxq);
+	if (err)
+		goto out;
+
+	if (cq->gdma_id >= gc->max_num_cqs)
+		goto out;
+
+	gc->cq_table[cq->gdma_id] = cq->gdma_cq;
+
+	mana_gd_arm_cq(cq->gdma_cq);
+out:
+	if (!err)
+		return rxq;
+
+	if_printf(ndev, "Failed to create RXQ: err = %d\n", err);
+
+	mana_destroy_rxq(apc, rxq, false);
+
+	if (cq)
+		mana_deinit_cq(apc, cq);
+
+	return NULL;
+}
+
+static int
+mana_add_rx_queues(struct mana_port_context *apc, struct ifnet *ndev)
+{
+	struct mana_rxq *rxq;
+	int err = 0;
+	int i;
+
+	for (i = 0; i < apc->num_queues; i++) {
+		rxq = mana_create_rxq(apc, i, &apc->eqs[i], ndev);
+		if (!rxq) {
+			err = ENOMEM;
+			goto out;
+		}
+
+		// u64_stats_init(&rxq->stats.syncp);
+
+		apc->rxqs[i] = rxq;
+	}
+
+	apc->default_rxobj = apc->rxqs[0]->rxobj;
+out:
+	return err;
+}
+
+static void
+mana_destroy_vport(struct mana_port_context *apc)
+{
+	struct mana_rxq *rxq;
+	uint32_t rxq_idx;
+
+	for (rxq_idx = 0; rxq_idx < apc->num_queues; rxq_idx++) {
+		rxq = apc->rxqs[rxq_idx];
+		if (!rxq)
+			continue;
+
+		mana_destroy_rxq(apc, rxq, true);
+		apc->rxqs[rxq_idx] = NULL;
+	}
+
+	mana_destroy_txq(apc);
+}
+
 static int
 mana_create_vport(struct mana_port_context *apc, struct ifnet *net)
 {
@@ -696,6 +1121,31 @@ mana_create_vport(struct mana_port_context *apc, struct ifnet *net)
 		return err;
 
 	return mana_create_txq(apc, net);
+}
+
+
+static void mana_rss_table_init(struct mana_port_context *apc)
+{
+	int i;
+
+	for (i = 0; i < MANA_INDIRECT_TABLE_SIZE; i++)
+		apc->indir_table[i] = i % apc->num_queues;
+}
+
+int mana_config_rss(struct mana_port_context *apc, enum TRI_STATE rx,
+		    bool update_hash, bool update_tab)
+{
+	u32 queue_idx;
+	int i;
+
+	if (update_tab) {
+		for (i = 0; i < MANA_INDIRECT_TABLE_SIZE; i++) {
+			queue_idx = apc->indir_table[i];
+			apc->rxobj_table[i] = apc->rxqs[queue_idx]->rxobj;
+		}
+	}
+
+	return mana_cfg_vport_steering(apc, rx, true, update_hash, update_tab);
 }
 
 static int
@@ -730,6 +1180,8 @@ mana_init_port(struct ifnet *ndev)
 	return 0;
 
 reset_apc:
+	bus_dma_tag_destroy(apc->rx_buf_tag);
+	apc->rx_buf_tag = NULL;
 	free(apc->rxqs, M_DEVBUF);
 	apc->rxqs = NULL;
 	return err;
@@ -750,9 +1202,11 @@ mana_alloc_queues(struct ifnet *ndev)
 	if (err)
 		goto destroy_eq;
 
+#if 0
 	err = netif_set_real_num_tx_queues(ndev, apc->num_queues);
 	if (err)
 		goto destroy_vport;
+#endif
 
 	err = mana_add_rx_queues(apc, ndev);
 	if (err)
@@ -760,9 +1214,11 @@ mana_alloc_queues(struct ifnet *ndev)
 
 	apc->rss_state = apc->num_queues > 1 ? TRI_STATE_TRUE : TRI_STATE_FALSE;
 
+#if 0
 	err = netif_set_real_num_rx_queues(ndev, apc->num_queues);
 	if (err)
 		goto destroy_vport;
+#endif
 
 	mana_rss_table_init(apc);
 
