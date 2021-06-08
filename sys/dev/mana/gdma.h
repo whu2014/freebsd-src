@@ -343,6 +343,8 @@ struct gdma_queue {
 #if 1 /*XXX */
 			struct task		cleanup_task;
 			struct taskqueue	*cleanup_tq;
+			int			cpu;
+			bool			do_not_ring_db;
 #endif
 			int			work_done;
 			int			budget;

@@ -100,6 +100,18 @@ typedef volatile uint32_t atomic_t;
 #define	atomic_sub_return(v, p)		(atomic_fetchadd_int(p, -(v)) - (v))
 #define	atomic_inc_return(p)		atomic_add_return(1, p)
 #define	atomic_dec_return(p)		atomic_sub_return(1, p)
+#define atomic_read(p)			atomic_add_return(0, p)
+
+#define usleep_range(_1, _2)						\
+    pause_sbt("gdma-usleep-range", SBT_1US * _1, SBT_1US * 1, C_ABSOLUTE)
+
+static inline void
+gdma_msleep(unsigned int ms)
+{
+	if (ms == 0)
+		ms = 1;
+	pause_sbt("gdma-msleep", mstosbt(ms), 0, C_HARDCLOCK);
+}
 
 static inline void
 bitmap_set(unsigned long *map, unsigned int start, int nr)

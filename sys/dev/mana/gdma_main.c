@@ -615,7 +615,8 @@ mana_gd_process_eq_events(void *arg)
 	/* XXX For MANA, rearm it when NAPI is done. */
 	if (mana_gd_is_hwc(eq->gdma_dev)) {
 		arm_bit = SET_ARM_BIT;
-	} else if (eq->eq.work_done < eq->eq.budget) {
+	} else if (eq->eq.work_done < eq->eq.budget &&
+	    eq->eq.do_not_ring_db == false) {
 		arm_bit = SET_ARM_BIT;
 	} else {
 		arm_bit = 0;
@@ -668,6 +669,7 @@ static int
 mana_gd_register_irq(struct gdma_queue *queue,
     const struct gdma_queue_spec *spec)
 {
+	static int mana_last_bind_cpu = -1;
 	struct gdma_dev *gd = queue->gdma_dev;
 	bool is_mana = mana_gd_is_mana(gd);
 	struct gdma_irq_context *gic;
@@ -711,18 +713,33 @@ mana_gd_register_irq(struct gdma_queue *queue,
 	gic = &gc->irq_contexts[msi_index];
 
 	if (is_mana) {
-#if 0
-#else
+		cpuset_t cpu_mask;
+
+		queue->eq.do_not_ring_db = false;
+
 		NET_TASK_INIT(&queue->eq.cleanup_task, 0, mana_poll, queue);
 		queue->eq.cleanup_tq =
 		    taskqueue_create_fast("mana eq cleanup",
 		    M_WAITOK, taskqueue_thread_enqueue,
 		    &queue->eq.cleanup_tq);
 
+		if (mana_last_bind_cpu < 0)
+			mana_last_bind_cpu = CPU_FIRST();
+		queue->eq.cpu = mana_last_bind_cpu;
+		mana_last_bind_cpu = CPU_NEXT(mana_last_bind_cpu);
+
 		/* XXX Name is not optimal. However we have to start
 		 * the task here. Otherwise, test eq will have no
 		 * handler.
 		 */
+#if 1
+		CPU_SETOF(queue->eq.cpu, &cpu_mask);
+		taskqueue_start_threads_cpuset(&queue->eq.cleanup_tq,
+		    1, PI_NET, &cpu_mask,
+		    "mana eq poll msix %u on cpu %d",
+		    msi_index, queue->eq.cpu);
+
+#else
 		taskqueue_start_threads(&queue->eq.cleanup_tq, 1, PI_NET,
 		    "mana eq poll on msix %u", msi_index);
 #endif

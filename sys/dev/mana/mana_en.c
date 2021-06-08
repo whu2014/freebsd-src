@@ -127,6 +127,19 @@ mana_get_counter(struct ifnet *ifp, ift_counter cnt)
 }
 
 static void
+mana_drain_eq_task(struct gdma_queue *queue)
+{
+	if (!queue || !queue->eq.cleanup_tq)
+		return;
+
+	while (taskqueue_cancel(queue->eq.cleanup_tq,
+	    &queue->eq.cleanup_task, NULL)) {
+		taskqueue_drain(queue->eq.cleanup_tq,
+		    &queue->eq.cleanup_task);
+	}
+}
+
+static void
 mana_qflush(struct ifnet *ifp)
 {
 	if_qflush(ifp);
@@ -854,6 +867,7 @@ mana_destroy_rxq(struct mana_port_context *apc, struct mana_rxq *rxq,
 
 	if (validate_state) {
 		// XXX mana_napi_sync_for_rx(rxq); should we flush and stor Q here?
+		// Cancel and drain cleanup task queue here.
 		;
 	}
 
@@ -1095,11 +1109,19 @@ mana_destroy_vport(struct mana_port_context *apc)
 {
 	struct mana_rxq *rxq;
 	uint32_t rxq_idx;
+	struct mana_cq *rx_cq;
+	struct gdma_queue *cq, *eq;
 
 	for (rxq_idx = 0; rxq_idx < apc->num_queues; rxq_idx++) {
 		rxq = apc->rxqs[rxq_idx];
 		if (!rxq)
 			continue;
+
+		rx_cq = &rxq->rx_cq;
+		if ((cq = rx_cq->gdma_cq) != NULL) {
+			eq = cq->cq.parent;
+			mana_drain_eq_task(eq);
+		}
 
 		mana_destroy_rxq(apc, rxq, true);
 		apc->rxqs[rxq_idx] = NULL;
@@ -1274,13 +1296,12 @@ mana_init(void *arg)
 static int
 mana_dealloc_queues(struct ifnet *ndev)
 {
-#if 0
 	struct mana_port_context *apc = netdev_priv(ndev);
 	struct mana_txq *txq;
 	int i, err;
 
 	if (apc->port_is_up)
-		return -EINVAL;
+		return EINVAL;
 
 	/* No packet can be transmitted now since apc->port_is_up is false.
 	 * There is still a tiny chance that mana_poll_tx_cq() can re-enable
@@ -1293,6 +1314,19 @@ mana_dealloc_queues(struct ifnet *ndev)
 	for (i = 0; i < apc->num_queues; i++) {
 		txq = &apc->tx_qp[i].txq;
 
+		struct mana_cq *tx_cq = &apc->tx_qp[i].tx_cq;
+		struct gdma_queue *eq = NULL;
+		if (tx_cq->gdma_cq)
+			eq = tx_cq->gdma_cq->cq.parent;
+		// eq = apc->eqs[i].eq;
+		if (eq) {
+			/* Stop EQ interrupt */
+			eq->eq.do_not_ring_db = true;
+			/* Schedule a cleanup task */
+			taskqueue_enqueue(eq->eq.cleanup_tq,
+			    &eq->eq.cleanup_task);
+		}
+
 		while (atomic_read(&txq->pending_sends) > 0)
 			usleep_range(1000, 2000);
 	}
@@ -1304,17 +1338,16 @@ mana_dealloc_queues(struct ifnet *ndev)
 	apc->rss_state = TRI_STATE_FALSE;
 	err = mana_config_rss(apc, TRI_STATE_FALSE, false, false);
 	if (err) {
-		netdev_err(ndev, "Failed to disable vPort: %d\n", err);
+		if_printf(ndev, "Failed to disable vPort: %d\n", err);
 		return err;
 	}
 
 	/* TODO: Implement RX fencing */
-	ssleep(1);
+	gdma_msleep(1000);
 
 	mana_destroy_vport(apc);
 
 	mana_destroy_eq(apc->ac->gdma_dev->gdma_context, apc);
-#endif
 
 	return 0;
 }
