@@ -165,33 +165,43 @@ mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 }
 
 static inline int
-mana_alloc_rx_mbuf(struct mana_port_context *apc, mana_rxq *rxq,
-    struct mana_recv_buf_oob *rx_oob)
+mana_load_rx_mbuf(struct mana_port_context *apc, mana_rxq *rxq,
+    struct mana_recv_buf_oob *rx_oob, bool alloc_mbuf)
 {
 	bus_dma_segment_t segs[1];
+	struct mbuf *mbuf;
 	int nsegs, err;
 	uint32_t mlen;
 
+
+#if 0 /*XXX do not check. Could be trying to refill */
 	/* If previously allocated mbuf exists */
 	if (unlikely(rx_oob->mbuf))
 		return 0;
+#endif
 
-	rx_oob->mbuf = m_getjcl(M_NOWAIT, MT_DATA, M_PKTHDR,
-	    rxq->datasize);
-	if (unlikely(rx_oob->mbuf == NULL)) {
-		rx_info->mbuf = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
-		if (unlikely(rx_oob->mbuf == NULL)) {
-			return ENOMEM;
+	if (alloc_mbuf) {
+		mbuf = m_getjcl(M_NOWAIT, MT_DATA, M_PKTHDR, rxq->datasize);
+		if (unlikely(mbuf == NULL)) {
+			mbuf = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+			if (unlikely(mbuf == NULL)) {
+				return ENOMEM;
+			}
+			mlen = MCLBYTES;
+		} else {
+			mlen = rxq->datasize;
 		}
-		mlen = MCLBYTES;
+
+		mbuf->m_pkthdr.len = mbuf->m_len = mlen;
 	} else {
-		mlen = rxq->datasize;
+		if (rx_oob->mbuf)
+			mbuf = rx_oob->mbuf;
+		else
+			return ENOMEM;
 	}
 
-	rx_oob->mbuf->m_pkthdr.len = rx_oob->mbuf->m_len = mlen;
-
 	err = bus_dmamap_load_mbuf_sg(apc->rx_buf_tag, rx_oob->dma_map,
-	    rx_oob->mbuf, segs, &nsegs, BUS_DMA_NOWAIT);
+	    mbuf, segs, &nsegs, BUS_DMA_NOWAIT);
 
 	if (unlikely((err != 0) || (nsegs != 1))) {
 		mana_trc_dbg(NULL, "Failed to map mbuf, error: %d, "
@@ -202,6 +212,7 @@ mana_alloc_rx_mbuf(struct mana_port_context *apc, mana_rxq *rxq,
 	bus_dmamap_sync(apc->rx_buf_tag, rx_oob->dma_map,
 	    BUS_DMASYNC_PREREAD);
 
+	rx_oob->mbuf = mbuf;
 	rx_oob->num_sge = 1;
 	rx_oob->sgl[0].address = segs[0].ds_addr;
 	rx_oob->sgl[0].size = mlen;
@@ -210,20 +221,22 @@ mana_alloc_rx_mbuf(struct mana_port_context *apc, mana_rxq *rxq,
 	return 0;
 
 error:
-	m_freem(rx_oob->mbuf);
-	rx_oob->mbuf = NULL;
+	m_freem(mbuf);
 	return EFAULT;
 }
 
-static void
-mana_free_rx_mbuf(struct mana_port_context *apc, mana_rxq *rxq,
-    struct mana_recv_buf_oob *rx_oob)
+static inline void
+mana_unload_rx_mbuf(struct mana_port_context *apc, mana_rxq *rxq,
+    struct mana_recv_buf_oob *rx_oob, bool free_mbuf)
 {
 	bus_dmamap_sync(apc->rx_buf_tag, rx_oob->dma_map,
 	    BUS_DMASYNC_POSTREAD);
-	bus_dmamap_unload((apc->rx_buf_tag, rx_oob->dma_map);
-	m_freem(rx_oob->mbuf);
-	rx_oob->mbuf = NULL;
+	bus_dmamap_unload(apc->rx_buf_tag, rx_oob->dma_map);
+
+	if (free_mbuf && rx_oob->mbuf) {
+		m_freem(rx_oob->mbuf);
+		rx_oob->mbuf = NULL;
+	}
 }
 
 static int
@@ -662,6 +675,232 @@ out:
 }
 
 static void
+mana_rx_mbuf(struct mbuf *mbuf, struct mana_rxcomp_oob *cqe,
+    struct mana_rxq *rxq)
+{
+	struct mana_stats *rx_stats = &rxq->stats;
+	struct ifnet *ndev = rxq->ndev;
+	uint32_t pkt_len = cqe->ppi[0].pkt_len;
+	uint16_t rxq_idx = rxq->rxq_idx;
+	struct mana_port_context *apc;
+	struct gdma_queue *eq;
+	struct mbuf *mbuf;
+	bool do_lro = false;
+	bool do_if_input;
+
+	apc = if_getsoftc(ndev);
+	eq = apc->eqs[rxq_idx].eq;
+	eq->eq.work_done++;
+
+	if (!mbuf) {
+		// XXX ++ndev->stats.rx_dropped;
+		return;
+	}
+
+	mbuf->m_flags |= M_PKTHDR;
+	mbuf->m_pkthdr.len = pkt_len;
+	mbuf->m_len = pkt_len;
+	mbuf->m_pkthdr.rcvif = ndev;
+
+	if ((ndev->if_capenable & IFCAP_RXCSUM ||
+	    ndev->if_capenable & IFCAP_RXCSUM_IPV6) &&
+	    (cqe->rx_iphdr_csum_succeed)) {
+		if (cqe->rx_tcp_csum_succeed || cqe->rx_udp_csum_succeed) {
+			mbuf->m_pkthdr.csum_flags = CSUM_IP_CHECKED;
+			mbuf->m_pkthdr.csum_flags |= CSUM_IP_VALID;
+
+			if (cqe->rx_tcp_csum_succeed)
+				do_lro = true;
+		}
+	}
+
+	if (cqe->rx_hashtype != 0) {
+		mbuf->m_pkthdr.flowid = cqe->ppi[0].pkt_hash;
+
+		uint16_t hashtype = cqe->rx_hashtype;
+		if (hashtype & NDIS_HASH_IPV4_L3_MASK) {
+			hashtype &= NDIS_HASH_IPV4_L4_MASK;
+			switch (hashtype) {
+			case NDIS_HASH_TCP_IPV4:
+				M_HASHTYPE_SET(mbuf, M_HASHTYPE_RSS_TCP_IPV4);
+				break;
+			case NDIS_HASH_UDP_IPV4
+				M_HASHTYPE_SET(mbuf, M_HASHTYPE_RSS_UDP_IPV4);
+				break;
+			default:
+				M_HASHTYPE_SET(mbuf, M_HASHTYPE_RSS_IPV4);
+			}
+		} else if (hashtype & NDIS_HASH_IPV6_L3_MASK) {
+			hashtype &= NDIS_HASH_IPV6_L4_MASK;
+			switch (hashtype) {
+			case NDIS_HASH_TCP_IPV6:
+				M_HASHTYPE_SET(mbuf, M_HASHTYPE_RSS_TCP_IPV6);
+				break;
+			case NDIS_HASH_TCP_IPV6_EX:
+				M_HASHTYPE_SET(mbuf,
+				    M_HASHTYPE_RSS_TCP_IPV6_EX);
+				break;
+			case NDIS_HASH_UDP_IPV6:
+				M_HASHTYPE_SET(mbuf, M_HASHTYPE_RSS_UDP_IPV6);
+				break;
+			case NDIS_HASH_UDP_IPV6_EX:
+				M_HASHTYPE_SET(mbuf,
+				    M_HASHTYPE_RSS_UDP_IPV6_EX);
+				break;
+			default
+				M_HASHTYPE_SET(mbuf, M_HASHTYPE_RSS_IPV6);
+			}
+		} else {
+			M_HASHTYPE_SET(mbuf, M_HASHTYPE_OPAQUE_HASH);
+		}
+	} else {
+		mbuf->m_pkthdr.flowid = rxq_idx;
+		M_HASHTYPE_SET(mbuf, M_HASHTYPE_NONE);
+	}
+
+	do_if_input = true;
+	if ((ndev->if_capenable & IFCAP_LRO) && do_lro) {
+		if (rxq->lro.lro_cnt != 0 &&
+		    tcp_lro_rx(&rxq->lro, mbuf, 0) == 0)
+			do_if_input = false;
+	}
+	if (do_if_input)
+		ndev->if_input(ndev, mbuf);
+
+	counter_enter();
+	counter_u64_add_protected(rx_stats->packets, 1);
+	counter_u64_add_protected(rx_stats->bytes, pkt_len);
+	counter_exit();
+}
+
+static void
+mana_process_rx_cqe(struct mana_rxq *rxq, struct mana_cq *cq,
+    struct gdma_comp *cqe)
+{
+	struct mana_rxcomp_oob *oob = (struct mana_rxcomp_oob *)cqe->cqe_data;
+	struct mana_recv_buf_oob *rxbuf_oob;
+	struct ifnet *ndev = rxq->ndev;
+	struct mana_port_context *apc;
+	struct mbuf *old_mbuf;
+	uint32_t curr, pktlen;
+	int err;
+
+	switch (oob->cqe_hdr.cqe_type) {
+	case CQE_RX_OKAY:
+		break;
+
+	case CQE_RX_TRUNCATED:
+		if_printf(ndev, "Dropped a truncated packet\n");
+		return;
+
+	case CQE_RX_COALESCED_4:
+		if_printf(ndev, "RX coalescing is unsupported\n");
+		return;
+
+	case CQE_RX_OBJECT_FENCE:
+		if_printf(ndev, "RX Fencing is unsupported\n");
+		return;
+
+	default:
+		if_printf(ndev, "Unknown RX CQE type = %d\n",
+		    oob->cqe_hdr.cqe_type);
+		return;
+	}
+
+	if (oob->cqe_hdr.cqe_type != CQE_RX_OKAY)
+		return;
+
+	pktlen = oob->ppi[0].pkt_len;
+
+	if (pktlen == 0) {
+		/* data packets should never have packetlength of zero */
+		if_printf(ndev, "RX pkt len=0, rq=%u, cq=%u, rxobj=0x%llx\n",
+		    rxq->gdma_id, cq->gdma_id, rxq->rxobj);
+		return;
+	}
+
+	curr = rxq->buf_index;
+	rxbuf_oob = &rxq->rx_oobs[curr];
+	if (rxbuf_oob->wqe_inf.wqe_size_in_bu != 1) {
+		mana_trc_err(NULL, "WARNING: Rx Incorrect complete "
+		    "WQE size %u\d",
+		    rxbuf_oob->wqe_inf.wqe_size_in_bu);
+	}
+
+	apc = if_getsoftc(ndev);
+
+	old_mbuf = rxbuf_oob->mbuf;
+
+	/* Unload DMA map for the old mbuf */
+	mana_unload_rx_mbuf(apc, rxq, rxbuf_oob, false);
+
+	/* Load a new mbuf to replace the old one */
+	err = mana_load_rx_mbuf(apc, rxq, rxbuf_oob, true);
+	if (err) {
+		/*
+		 * Failed to load new mbuf, rxbuf_oob->mbuf is still
+		 * pointing to the old one. Drop the packet.
+		 */
+		 old_mbuf = NULL:
+		 /* Reload the existing mbuf */
+		 mana_load_rx_mbuf(apc, rxq, rxbuf_oob, false);
+	}
+
+	mana_rx_mbuf(old_mbuf, oob, rxq);
+
+	mana_move_wq_tail(rxq->gdma_rq, rxbuf_oob->wqe_inf.wqe_size_in_bu);
+
+	mana_post_pkt_rxq(rxq);
+}
+
+static void
+mana_poll_rx_cq(struct mana_cq *cq)
+{
+	struct gdma_comp *comp = cq->gdma_comp_buf;
+	int comp_read, i;
+
+	comp_read = mana_gd_poll_cq(cq->gdma_cq, comp, CQE_POLLING_BUFFER);
+	KASSERT(comp_read <= CQE_POLLING_BUFFER,
+	    ("comp_read %d great than buf size %d",
+	    comp_read, CQE_POLLING_BUFFER));
+
+	for (i = 0; i < comp_read; i++) {
+		if (comp[i].is_sq == true) {
+			mana_trc_err(NULL,
+			    "WARNING: CQE not for receive queue\n");
+			return;
+		}
+
+		/* verify recv cqe references the right rxq */
+		if (comp[i].wq_num != cq->rxq->gdma_id) {
+			mana_trc_err(NULL,
+			    "WARNING: Received CQE %d  not for "
+			    "this receive queue %d\n",
+			    comp[i].wq_num,  cq->rxq->gdma_id);
+			return;
+		}
+
+		mana_process_rx_cqe(cq->rxq, cq, &comp[i]);
+	}
+}
+
+static void
+mana_cq_handler(void *context, struct gdma_queue *gdma_queue)
+{
+	struct mana_cq *cq = context;
+
+	KASSERT(cq->gdma_cq == gdma_queue,
+	    ("cq do not match %p, %p", cq->gdma_cq, gdma_queue));
+
+	if (cq->type == MANA_CQ_TYPE_RX)
+		mana_poll_rx_cq(cq);
+	else
+		mana_poll_tx_cq(cq);
+
+	mana_gd_arm_cq(gdma_queue);
+}
+
+static void
 mana_deinit_cq(struct mana_port_context *apc, struct mana_cq *cq)
 {
 	struct gdma_dev *gd = apc->ac->gdma_dev;
@@ -881,7 +1120,7 @@ mana_destroy_rxq(struct mana_port_context *apc, struct mana_rxq *rxq,
 		if (!rx_oob->mbuf)
 			continue;
 
-		mana_free_rx_mbuf(apc, rxq, rx_oob);
+		mana_unload_rx_mbuf(apc, rxq, rx_oob, true);
 	}
 
 	if (rxq->gdma_rq)
@@ -921,7 +1160,7 @@ mana_alloc_rx_wqe(struct mana_port_context *apc,
 			return err;
 		}
 
-		err = mana_alloc_rx_mbuf(apc, rxq, rx_oob);
+		err = mana_load_rx_mbuf(apc, rxq, rx_oob, true);
 		if (err) {
 			mana_trc_err(NULL,
 			    "Failed to  create rx DMA map for buf %d\n", i);
@@ -1002,6 +1241,17 @@ mana_create_rxq(struct mana_port_context *apc, uint32_t rxq_idx,
 	err = mana_alloc_rx_wqe(apc, rxq, &rq_size, &cq_size);
 	if (err)
 		goto out;
+
+	/* Create LRO for the RQ */
+	if (ndev->if_capenable & IFCAP_LRO) {
+		err = tcp_lro_init(&rxq->lro);
+		if (err) {
+			if_printf(ndev, "Failed to create LRO for rxq %d\n",
+			    rxq_idx);
+		} else {
+			rxq->lro.ifp = ndev;
+		}
+	}
 
 	rq_size = PAGE_ALIGN(rq_size);
 	cq_size = PAGE_ALIGN(cq_size);
@@ -1467,6 +1717,8 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 	ndev->if_capabilities |= IFCAP_TXCSUM | IFCAP_TXCSUM_IPV6;
 	ndev->if_capabilities |= IFCAP_RXCSUM | IFCAP_RXCSUM_IPV6;
 	ndev->if_capabilities |= IFCAP_TSO4 | IFCAP_TSO6;
+
+	ndev->if_capabilities |= IFCAP_LRO;
 
 	ndev->if_capabilities |= IFCAP_JUMBO_MTU;
 

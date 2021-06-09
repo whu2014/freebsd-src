@@ -116,9 +116,8 @@ enum TRI_STATE {
 #endif
 
 struct mana_stats {
-	uint64_t			packets;
-	uint64_t			bytes;
-	//XXXstruct uint64_t_stats_sync	syncp;
+	counter_u64_t			packets;
+	counter_u64_t			bytes;
 };
 
 struct mana_txq {
@@ -270,6 +269,13 @@ struct mana_cqe_header {
 	(NDIS_HASH_TCP_IPV4 | NDIS_HASH_UDP_IPV4 | NDIS_HASH_TCP_IPV6 |      \
 	 NDIS_HASH_UDP_IPV6 | NDIS_HASH_TCP_IPV6_EX | NDIS_HASH_UDP_IPV6_EX)
 
+#define NDIS_HASH_IPV4_L3_MASK	(NDIS_HASH_IPV4)
+#define NDIS_HASH_IPV4_L4_MASK	(NDIS_HASH_TCP_IPV4 | NDIS_HASH_UDP_IPV4)
+#define NDIS_HASH_IPV6_L3_MASK	(NDIS_HASH_IPV6 | NDIS_HASH_IPV6_EX)
+#define NDIS_HASH_IPV6_L4_MASK						\
+    (NDIS_HASH_TCP_IPV6 | NDIS_HASH_UDP_IPV6 |				\
+    NDIS_HASH_TCP_IPV6_EX | NDIS_HASH_UDP_IPV6_EX)
+
 struct mana_rxcomp_perpkt_info {
 	uint32_t pkt_len	:16;
 	uint32_t reserved1	:16;
@@ -375,6 +381,7 @@ struct mana_rxq {
 	struct mana_cq			rx_cq;
 
 	struct ifnet			*ndev;
+	struct lro_ctrl			lro;
 
 	/* Total number of receive buffers to be allocated */
 	uint32_t			num_rx_buf;
