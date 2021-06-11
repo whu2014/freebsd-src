@@ -115,6 +115,17 @@ enum TRI_STATE {
 #define MAX_PORTS_IN_MANA_DEV		16
 #endif
 
+struct mana_send_buf_info {
+	struct mbuf			*mbuf;
+	bus_dmamap_t			dma_map;
+
+	/* Required to store the result of mana_gd_post_work_request.
+	 * gdma_posted_wqe_info.wqe_size_in_bu is required for progressing the
+	 * work queue when the WQE is consumed.
+	 */
+	struct gdma_posted_wqe_info	wqe_inf;
+}
+
 struct mana_stats {
 	counter_u64_t			packets;
 	counter_u64_t			bytes;
@@ -143,6 +154,7 @@ struct mana_txq {
 
 #endif
 	/* The mbufs are sent to the HW and we are waiting for the CQEs. */
+	struct mana_send_buf_info	*tx_buf_info;
 	uint16_t		next_to_use;
 	uint16_t		next_to_complete;
 
@@ -167,6 +179,7 @@ struct mana_txq {
  * Save one for emergency use, set the MAX_MBUF_FRAGS allowed to 30.
  */
 #define	MAX_MBUF_FRAGS		30
+#define MANA_TSO_MAXSEG_SZ	PAGE_SIZE
 
 /* mbuf data and frags dma mappings */
 struct mana_mbuf_head {
@@ -426,6 +439,7 @@ struct mana_port_context {
 
 	/* DMA tag used for queue bufs of the entire port */
 	bus_dma_tag_t		rx_buf_tag;
+	bus_dma_tag_t		tx_buf_tag;
 
 	uint8_t			mac_addr[ETHER_ADDR_LEN];
 
