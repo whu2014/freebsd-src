@@ -110,7 +110,7 @@ enum TRI_STATE {
 #define LOG2_EQ_THROTTLE		3
 
 #if 1 /* XXX */
-#define MAX_PORTS_IN_MANA_DEV		2
+#define MAX_PORTS_IN_MANA_DEV		1
 #else
 #define MAX_PORTS_IN_MANA_DEV		16
 #endif
@@ -146,6 +146,8 @@ struct mana_txq {
 	uint16_t		vp_offset;
 
 	struct ifnet		*ndev;
+	/* Store index to the array of tx_qp in port structure */
+	int			idx;
 
 #if 0 /* XXX */
 	/* The SKBs are sent to the HW and we are waiting for the CQEs. */
@@ -649,8 +651,7 @@ struct mana_cfg_rx_steer_resp {
 
 struct mana_tx_package {
 	struct gdma_wqe_request		wqe_req;
-	struct gdma_sge			sgl_array[5];
-	struct gdma_sge			*sgl_ptr;
+	struct gdma_sge			sgl_array[MAX_MBUF_FRAGS];
 
 	struct mana_tx_oob		tx_oob;
 
