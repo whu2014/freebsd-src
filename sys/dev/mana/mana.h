@@ -37,10 +37,13 @@
 #include <sys/types.h>
 #include <sys/proc.h>
 #include <sys/socket.h>
+#include <sys/taskqueue.h>
+#include <sys/counter.h>
 
 #include <net/ethernet.h>
 #include <net/if.h>
 #include <net/if_media.h>
+#include <netinet/tcp_lro.h>
 
 #include "gdma.h"
 #include "hw_channel.h"
@@ -124,7 +127,7 @@ struct mana_send_buf_info {
 	 * work queue when the WQE is consumed.
 	 */
 	struct gdma_posted_wqe_info	wqe_inf;
-}
+};
 
 struct mana_stats {
 	counter_u64_t			packets;

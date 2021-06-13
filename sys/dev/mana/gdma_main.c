@@ -713,8 +713,6 @@ mana_gd_register_irq(struct gdma_queue *queue,
 	gic = &gc->irq_contexts[msi_index];
 
 	if (is_mana) {
-		cpuset_t cpu_mask;
-
 		queue->eq.do_not_ring_db = false;
 
 		NET_TASK_INIT(&queue->eq.cleanup_task, 0, mana_poll, queue);
@@ -732,7 +730,8 @@ mana_gd_register_irq(struct gdma_queue *queue,
 		 * the task here. Otherwise, test eq will have no
 		 * handler.
 		 */
-#if 1
+#if 0
+		cpuset_t cpu_mask;
 		CPU_SETOF(queue->eq.cpu, &cpu_mask);
 		taskqueue_start_threads_cpuset(&queue->eq.cleanup_tq,
 		    1, PI_NET, &cpu_mask,
@@ -1047,7 +1046,7 @@ mana_gd_create_dma_region(struct gdma_dev *gd,
 		return EINVAL;
 	}
 
-	if (offset_in_page(gmi->virt_addr) != 0) {
+	if (offset_in_page((uint64_t)gmi->virt_addr) != 0) {
 		mana_trc_dbg(NULL, "gmi not page aligned: %p\n",
 		    gmi->virt_addr);
 		return EINVAL;
@@ -1182,7 +1181,7 @@ int mana_gd_create_mana_wq_cq(struct gdma_dev *gd,
 out:
 	mana_gd_free_memory(gmi);
 free_q:
-	kfree(queue);
+	free(queue, M_DEVBUF);
 	return err;
 }
 
