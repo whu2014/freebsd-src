@@ -783,7 +783,7 @@ mana_send_request(struct mana_context *ac, void *in_buf,
 	struct gdma_resp_hdr *resp = out_buf;
 	struct gdma_req_hdr *req = in_buf;
 	device_t dev = gc->dev;
-	atomic_t activity_id;
+	static atomic_t activity_id;
 	int err;
 
 	req->dev_id = gc->mana.dev_id;
@@ -1971,9 +1971,12 @@ mana_create_rxq(struct mana_port_context *apc, uint32_t rxq_idx,
 	 * Now we just allow maxium size of 4096.
 	 */
 	// XXX rxq->datasize = ALIGN(MAX_FRAME_SIZE, 64);
-	rxq->datasize = ALIGN(rxq->datasize, MCLBYTES);
+	rxq->datasize = ALIGN(MAX_FRAME_SIZE, MCLBYTES);
 	if (rxq->datasize > 4096)
 		rxq->datasize = 4096;
+
+	mana_trc_dbg(NULL, "Setting rxq %d datasize %d\n",
+	    rxq_idx, rxq->datasize);
 
 	rxq->rxobj = INVALID_MANA_HANDLE;
 
