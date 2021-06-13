@@ -70,6 +70,9 @@ __FBSDID("$FreeBSD$");
 
 #include "mana.h"
 
+static int mana_up(struct mana_port_context *apc);
+static int mana_down(struct mana_port_context *apc);
+
 static void
 mana_rss_key_fill(void *k, size_t size)
 {
@@ -147,13 +150,38 @@ mana_qflush(struct ifnet *ifp)
 static int
 mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 {
-	//struct ifreq *ifr = (struct ifreq *)data;
+	struct mana_port_context *apc = if_getsoftc(ifp);
+	// struct ifreq *ifr = (struct ifreq *)data;
+	struct ifrsskey *ifrk;
 	int rc = 0;
 
 #if 1
 	switch (command) {
 	case SIOCSIFMTU:
+		break;
 	case SIOCSIFFLAGS:
+		if (ifp->if_flags & IFF_UP) {
+			if ((ifp->if_drv_flags & IFF_DRV_RUNNING) == 0) {
+				MANA_APC_LOCK_LOCK(apc);
+				if (!apc->port_is_up)
+					mana_up(apc);
+				MANA_APC_LOCK_UNLOCK(apc);
+			}
+		} else {
+			if (ifp->if_drv_flags & IFF_DRV_RUNNING) {
+				MANA_APC_LOCK_LOCK(apc);
+				if (apc->port_is_up)
+					mana_down(apc);
+				MANA_APC_LOCK_UNLOCK(apc);
+			}
+		}
+		break;
+	case SIOCGIFRSSKEY:
+		ifrk = (struct ifrsskey *)data;
+		ifrk->ifrk_func = RSS_FUNC_TOEPLITZ;
+		ifrk->ifrk_keylen = MANA_HASH_KEY_SIZE;
+		memcpy(ifrk->ifrk_key, apc->hashkey, MANA_HASH_KEY_SIZE);
+		break;
 	default:
 		rc = ether_ioctl(ifp, command, data);
 		break;
@@ -2227,9 +2255,13 @@ mana_up(struct mana_port_context *apc)
 #if 1
 	int err;
 
+	mana_trc_dbg(NULL, "mana_up called\n");
+
 	err = mana_alloc_queues(apc->ndev);
-	if (err)
+	if (err) {
+		mana_trc_err(NULL, "Faile alloc mana queues: %d\n", err);
 		return err;
+	}
 #endif
 	apc->port_is_up = true;
 
@@ -2333,6 +2365,10 @@ mana_down(struct mana_port_context *apc)
 		if_link_state_change(apc->ndev, LINK_STATE_DOWN);
 
 		err = mana_dealloc_queues(apc->ndev);
+		if (err) {
+			if_printf(apc->ndev,
+			    "Failed to bring down mana interface: %d\n", err);
+		}
 	}
 
 	return err;
@@ -2500,8 +2536,11 @@ int mana_probe(struct gdma_dev *gd)
 #if 1
 	for (i = 0; i < ac->num_ports; i++) {
 		err = mana_probe_port(ac, i, &ac->ports[i]);
-		if (err)
+		if (err) {
+			device_printf(dev,
+			    "Failed to probe mana port %d\n", i);
 			break;
+		}
 	}
 #endif
 out:
