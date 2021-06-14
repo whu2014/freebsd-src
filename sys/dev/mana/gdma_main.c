@@ -640,6 +640,7 @@ mana_poll(void *arg, int pending)
 	eq->eq.work_done = 0;
 	eq->eq.budget = MANA_RX_BUDGET;
 
+	mana_trc_dbg(NULL, "mana cleanup thread check 10\n");
 	for (i = 0; i < MANA_POLL_BUDGET; i++) {
 		/*
 		 * If this is the last loop, set the budget big enough
@@ -1509,6 +1510,9 @@ mana_gd_read_cqe(struct gdma_queue *cq, struct gdma_comp *comp)
 	/* Return -1 if overflow detected. */
 	if (owner_bits != new_bits)
 		return -1;
+
+	/*XXX weh */
+	mana_trc_dbg(NULL, "!!! cqe last dword is 0x%x\n", cqe->cqe_info.as_uint32);
 
 	comp->wq_num = cqe->cqe_info.wq_num;
 	comp->is_sq = cqe->cqe_info.is_sq;
