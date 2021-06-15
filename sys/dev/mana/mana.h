@@ -293,6 +293,11 @@ struct mana_cqe_header {
 #define NDIS_HASH_IPV6_L4_MASK						\
     (NDIS_HASH_TCP_IPV6 | NDIS_HASH_UDP_IPV6 |				\
     NDIS_HASH_TCP_IPV6_EX | NDIS_HASH_UDP_IPV6_EX)
+#define NDIS_HASH_IPV4_MASK						\
+    (NDIS_HASH_IPV4_L3_MASK | NDIS_HASH_IPV4_L4_MASK)
+#define NDIS_HASH_IPV6_MASK						\
+    (NDIS_HASH_IPV6_L3_MASK | NDIS_HASH_IPV6_L4_MASK)
+
 
 struct mana_rxcomp_perpkt_info {
 	uint32_t pkt_len	:16;

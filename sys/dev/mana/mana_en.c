@@ -330,10 +330,12 @@ mana_load_rx_mbuf(struct mana_port_context *apc, struct mana_rxq *rxq,
 
 		mbuf->m_pkthdr.len = mbuf->m_len = mlen;
 	} else {
-		if (rx_oob->mbuf)
+		if (rx_oob->mbuf) {
 			mbuf = rx_oob->mbuf;
-		else
+			mlen = rx_oob->mbuf->m_pkthdr.len;
+		} else {
 			return ENOMEM;
+		}
 	}
 
 	err = bus_dmamap_load_mbuf_sg(apc->rx_buf_tag, rx_oob->dma_map,
@@ -446,7 +448,9 @@ mana_xmit(struct mana_txq *txq)
 			continue;
 		}
 
-		mana_trc_dbg(NULL, "check 30\n");
+		mana_trc_dbg(NULL, "check 30, orig mbuf = %p, "
+		    "mbuf = %p, nsegs = %d\n",
+		    mbuf, tx_info->mbuf, pkg.wqe_req.num_sge);
 
 		pkg.tx_oob.s_oob.vcq_num = cq->gdma_id;
 		pkg.tx_oob.s_oob.vsq_frame = txq->vsq_frame;
@@ -475,16 +479,24 @@ mana_xmit(struct mana_txq *txq)
 			else
 				pkg.tx_oob.s_oob.is_outer_ipv6 = 1;
 
+			pkg.tx_oob.s_oob.comp_iphdr_csum = 1;
 			pkg.tx_oob.s_oob.comp_tcp_csum = 1;
 			pkg.tx_oob.s_oob.trans_off = mbuf->m_pkthdr.l3hlen;
 
 			pkg.wqe_req.client_data_unit = mbuf->m_pkthdr.tso_segsz;
 		} else if (mbuf->m_pkthdr.csum_flags &
 		    (CSUM_IP_UDP | CSUM_IP_TCP | CSUM_IP6_UDP | CSUM_IP6_TCP)) {
-			if (MANA_L3_PROTO(mbuf) == ETHERTYPE_IP)
+			if (MANA_L3_PROTO(mbuf) == ETHERTYPE_IP) {
 				pkg.tx_oob.s_oob.is_outer_ipv4 = 1;
-			else
+				pkg.tx_oob.s_oob.comp_iphdr_csum = 1;
+				mana_trc_dbg(NULL,
+				    "check 35, mbuf ipv4, l4 = %d, "
+				    "tansport start = %d\n",
+				    MANA_L4_PROTO(mbuf),
+				    mbuf->m_pkthdr.l3hlen);
+			} else {
 				pkg.tx_oob.s_oob.is_outer_ipv6 = 1;
+			}
 
 			if (MANA_L4_PROTO(mbuf) == IPPROTO_TCP) {
 				pkg.tx_oob.s_oob.comp_tcp_csum = 1;
@@ -493,11 +505,21 @@ mana_xmit(struct mana_txq *txq)
 			} else {
 				pkg.tx_oob.s_oob.comp_udp_csum = 1;
 			}
+		} else if (mbuf->m_pkthdr.csum_flags & CSUM_IP) {
+			pkg.tx_oob.s_oob.is_outer_ipv4 = 1;
+			pkg.tx_oob.s_oob.comp_iphdr_csum = 1;
+		} else {
+			if (MANA_L3_PROTO(mbuf) == ETHERTYPE_IP)
+				pkg.tx_oob.s_oob.is_outer_ipv4 = 1;
+			else if (MANA_L3_PROTO(mbuf) == ETHERTYPE_IPV6)
+				pkg.tx_oob.s_oob.is_outer_ipv6 = 1;
 		}
 
 		len = mbuf->m_pkthdr.len;
 
-		mana_trc_dbg(NULL, "check 40, mbuf len = %d\n", len);
+		mana_trc_dbg(NULL,
+		    "check 40, mbuf len = %d, csum_flags = 0x%x\n",
+		    len, mbuf->m_pkthdr.csum_flags);
 
 		err = mana_gd_post_work_request(gdma_sq, &pkg.wqe_req,
 		    (struct gdma_posted_wqe_info *)&tx_info->wqe_inf);
@@ -652,10 +674,12 @@ mana_mbuf_csum_check(struct mbuf *mbuf)
 		 * Only set the L4 proto when the csum_flag and
 		 * proto match.
 		 */
+#if 0
 		if (((mbuf->m_pkthdr.csum_flags & CSUM_IP_TCP) &&
 		    ip->ip_p == IPPROTO_TCP) ||
 		    ((mbuf->m_pkthdr.csum_flags & CSUM_IP_UDP) &&
 		    ip->ip_p == IPPROTO_UDP))
+#endif
 			MANA_L4_PROTO(mbuf) = ip->ip_p;
 	} else if (etype == ETHERTYPE_IPV6) {
 		const struct ip6_hdr *ip6;
@@ -667,16 +691,18 @@ mana_mbuf_csum_check(struct mbuf *mbuf)
 		 * Only set the L4 proto when the csum_flag and
 		 * proto match.
 		 */
+#if 0
 		if (((mbuf->m_pkthdr.csum_flags & CSUM_IP6_TCP) &&
 		    ip6->ip6_nxt == IPPROTO_TCP) ||
 		    ((mbuf->m_pkthdr.csum_flags & CSUM_IP6_UDP) &&
 		    ip6->ip6_nxt == IPPROTO_UDP))
+#endif
 			MANA_L4_PROTO(mbuf) = ip6->ip6_nxt;
 	} else {
 		/* XXX Should we free the mbuf and return? */
-		m_freem(mbuf);
-		return NULL;
-		// MANA_L3_PROTO(mbuf) = 0;
+		//m_freem(mbuf);
+		//return NULL;
+		MANA_L4_PROTO(mbuf) = 0;
 		// goto out;
 	}
 
@@ -703,8 +729,12 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 		if (unlikely(m == NULL)) {
 			return EIO;
 		}
+#if 0
 	} else if (m->m_pkthdr.csum_flags &
 	    (CSUM_IP_UDP | CSUM_IP_TCP | CSUM_IP6_UDP | CSUM_IP6_TCP)) {
+#else
+	} else {
+#endif
 		m = mana_mbuf_csum_check(m);
 		if (unlikely(m == NULL)) {
 			return EIO;
@@ -723,7 +753,12 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 
 	txq = &apc->tx_qp[txq_id].txq;
 
-	mana_trc_dbg(NULL, "txq check 40, choose txq_id = %d\n", txq_id);
+	mana_trc_dbg(NULL, "txq check 40, choose txq_id = %d, mbuf = %p, "
+	    "head len = %d, mlen = %d, "
+	    "l3 proto = 0x%x, l3-start = %u, l4 proto = 0x%x, l4-len = %d\n",
+	    txq_id, m, m->m_pkthdr.len, m->m_len,
+	    MANA_L3_PROTO(m), m->m_pkthdr.l2hlen,
+	    MANA_L4_PROTO(m), m->m_pkthdr.l3hlen);
 
 	is_drbr_empty = drbr_empty(ifp, txq->txq_br);
 	err = drbr_enqueue(ifp, txq->txq_br, m);
@@ -1236,7 +1271,7 @@ mana_poll_tx_cq(struct mana_cq *cq)
 	unsigned int avail_space;
 	bool txq_full = false;
 #endif
-	mana_trc_dbg(NULL, "tx complete check 10\n");
+	// mana_trc_dbg(NULL, "tx complete check 10\n");
 
 	ndev = txq->ndev;
 	apc = if_getsoftc(ndev);
@@ -1290,14 +1325,14 @@ mana_poll_tx_cq(struct mana_cq *cq)
 			    cqe_oob->cqe_hdr.cqe_type);
 			return;
 		}
-
-		if (txq->gdma_txq_id != completions[i].wq_num) {
-			mana_trc_dbg(NULL, "***tx complete check 25, %d != %d\n",
+		/* XXX: ~0x300 to work around buggy FPGA image sine 5/2021*/
+		if (txq->gdma_txq_id != (completions[i].wq_num & ~0x300)) {
+			mana_trc_dbg(NULL,
+			    "txq gdma id not match completion wq num: "
+			    "%d != %d\n",
 			    txq->gdma_txq_id, completions[i].wq_num);
 			return;
 		}
-		mana_trc_dbg(NULL, "tx complete check 30, gdma_txq_id = %d\n",
-		    txq->gdma_txq_id);
 
 		next_to_complete = txq->next_to_complete;
 		tx_info = &txq->tx_buf_info[next_to_complete];
@@ -1310,6 +1345,8 @@ mana_poll_tx_cq(struct mana_cq *cq)
 
 		wqe_info = &tx_info->wqe_inf;
 		wqe_unit_cnt += wqe_info->wqe_size_in_bu;
+
+		mana_trc_dbg(NULL, "tx completing mbuf = %p\n", tx_info->mbuf);
 
 		mana_tx_unmap_mbuf(apc, tx_info);
 
@@ -1420,19 +1457,25 @@ mana_rx_mbuf(struct mbuf *mbuf, struct mana_rxcomp_oob *cqe,
 		return;
 	}
 
-	mana_trc_dbg(NULL, "rxq check 10\n");
-
 	mbuf->m_flags |= M_PKTHDR;
 	mbuf->m_pkthdr.len = pkt_len;
 	mbuf->m_len = pkt_len;
 	mbuf->m_pkthdr.rcvif = ndev;
 
+	mana_trc_dbg(NULL, "rxq check 10, mbuf_len %d, hashtype = 0x%x "
+	    "out-ip-csum-s: %u, ip-csum-s: %u, tcp-csum-s: %u, udp_csum-s: %u\n",
+	    pkt_len, cqe->rx_hashtype, cqe->rx_outer_iphdr_csum_succeed,
+	    cqe->rx_iphdr_csum_succeed, cqe->rx_tcp_csum_succeed,
+	    cqe->rx_udp_csum_succeed);
+
 	if ((ndev->if_capenable & IFCAP_RXCSUM ||
 	    ndev->if_capenable & IFCAP_RXCSUM_IPV6) &&
 	    (cqe->rx_iphdr_csum_succeed)) {
+		mbuf->m_pkthdr.csum_flags = CSUM_IP_CHECKED;
+		mbuf->m_pkthdr.csum_flags |= CSUM_IP_VALID;
 		if (cqe->rx_tcp_csum_succeed || cqe->rx_udp_csum_succeed) {
-			mbuf->m_pkthdr.csum_flags = CSUM_IP_CHECKED;
-			mbuf->m_pkthdr.csum_flags |= CSUM_IP_VALID;
+			mbuf->m_pkthdr.csum_flags |= CSUM_L4_CALC;
+			mbuf->m_pkthdr.csum_flags |= CSUM_L4_VALID;
 
 			if (cqe->rx_tcp_csum_succeed)
 				do_lro = true;
@@ -1443,8 +1486,8 @@ mana_rx_mbuf(struct mbuf *mbuf, struct mana_rxcomp_oob *cqe,
 		mbuf->m_pkthdr.flowid = cqe->ppi[0].pkt_hash;
 
 		uint16_t hashtype = cqe->rx_hashtype;
-		if (hashtype & NDIS_HASH_IPV4_L3_MASK) {
-			hashtype &= NDIS_HASH_IPV4_L4_MASK;
+		if (hashtype & NDIS_HASH_IPV4_MASK) {
+			hashtype &= NDIS_HASH_IPV4_MASK;
 			switch (hashtype) {
 			case NDIS_HASH_TCP_IPV4:
 				M_HASHTYPE_SET(mbuf, M_HASHTYPE_RSS_TCP_IPV4);
@@ -1455,8 +1498,8 @@ mana_rx_mbuf(struct mbuf *mbuf, struct mana_rxcomp_oob *cqe,
 			default:
 				M_HASHTYPE_SET(mbuf, M_HASHTYPE_RSS_IPV4);
 			}
-		} else if (hashtype & NDIS_HASH_IPV6_L3_MASK) {
-			hashtype &= NDIS_HASH_IPV6_L4_MASK;
+		} else if (hashtype & NDIS_HASH_IPV6_MASK) {
+			hashtype &= NDIS_HASH_IPV6_MASK;
 			switch (hashtype) {
 			case NDIS_HASH_TCP_IPV6:
 				M_HASHTYPE_SET(mbuf, M_HASHTYPE_RSS_TCP_IPV6);
@@ -1577,7 +1620,8 @@ mana_process_rx_cqe(struct mana_rxq *rxq, struct mana_cq *cq,
 		 mana_load_rx_mbuf(apc, rxq, rxbuf_oob, false);
 	}
 
-	mana_trc_dbg(NULL, "Before calling mana_rx_mbuf, curr = %d\n", curr);
+	mana_trc_dbg(NULL, "Before calling mana_rx_mbuf, curr = %d, "
+	    "old mbuf %p, new mbuf %p\n", curr, old_mbuf, rxbuf_oob->mbuf);
 	mana_rx_mbuf(old_mbuf, oob, rxq);
 
 	mana_move_wq_tail(rxq->gdma_rq, rxbuf_oob->wqe_inf.wqe_size_in_bu);
@@ -1628,10 +1672,10 @@ mana_cq_handler(void *context, struct gdma_queue *gdma_queue)
 
 	mana_trc_dbg(NULL, "check 10\n");
 	if (cq->type == MANA_CQ_TYPE_RX) {
-		mana_trc_dbg(NULL, "check 20, calling RX complete\n");
+		// mana_trc_dbg(NULL, "check 20, calling RX complete\n");
 		mana_poll_rx_cq(cq);
 	} else {
-		mana_trc_dbg(NULL, "check 30, calling TX complete\n");
+		// mana_trc_dbg(NULL, "check 30, calling TX complete\n");
 		mana_poll_tx_cq(cq);
 	}
 

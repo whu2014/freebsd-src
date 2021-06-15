@@ -361,9 +361,9 @@ int mana_gd_disable_queue(struct gdma_queue *queue)
 	struct gdma_general_resp resp = {};
 	int err;
 
-	// XXX WARN_ON(queue->type != GDMA_EQ);
-	mana_trc_warn(NULL, "Not event queue type 0x%x\n",
-	    queue->type);
+	if (queue->type != GDMA_EQ)
+		mana_trc_warn(NULL, "Not event queue type 0x%x\n",
+		    queue->type);
 
 	mana_gd_init_req_hdr(&req.hdr, GDMA_DISABLE_QUEUE,
 	    sizeof(req), sizeof(resp));
@@ -1512,7 +1512,7 @@ mana_gd_read_cqe(struct gdma_queue *cq, struct gdma_comp *comp)
 		return -1;
 
 	/*XXX weh */
-	mana_trc_dbg(NULL, "!!! cqe last dword is 0x%x\n", cqe->cqe_info.as_uint32);
+	// mana_trc_dbg(NULL, "!!! cqe last dword is 0x%x\n", cqe->cqe_info.as_uint32);
 
 	comp->wq_num = cqe->cqe_info.wq_num;
 	comp->is_sq = cqe->cqe_info.is_sq;
