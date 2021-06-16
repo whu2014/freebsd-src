@@ -640,14 +640,17 @@ mana_poll(void *arg, int pending)
 	eq->eq.work_done = 0;
 	eq->eq.budget = MANA_RX_BUDGET;
 
-	mana_trc_dbg(NULL, "mana cleanup thread check 10\n");
+	// mana_trc_dbg(NULL, "mana cleanup thread check 10\n");
 	for (i = 0; i < MANA_POLL_BUDGET; i++) {
 		/*
 		 * If this is the last loop, set the budget big enough
 		 * so it will arm the EQ any way.
 		 */
-		if (i == (MANA_POLL_BUDGET - 1))
+		if (i == (MANA_POLL_BUDGET - 1)) {
+			mana_trc_dbg(NULL,
+			    "mana poll in last loop i = %d\n", i);
 			eq->eq.budget = CQE_POLLING_BUFFER + 1;
+		}
 
 		mana_gd_process_eq_events(eq);
 
