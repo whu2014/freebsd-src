@@ -1474,8 +1474,9 @@ mana_rx_mbuf(struct mbuf *mbuf, struct mana_rxcomp_oob *cqe,
 		mbuf->m_pkthdr.csum_flags = CSUM_IP_CHECKED;
 		mbuf->m_pkthdr.csum_flags |= CSUM_IP_VALID;
 		if (cqe->rx_tcp_csum_succeed || cqe->rx_udp_csum_succeed) {
-			mbuf->m_pkthdr.csum_flags |= CSUM_L4_CALC;
-			mbuf->m_pkthdr.csum_flags |= CSUM_L4_VALID;
+			mbuf->m_pkthdr.csum_flags |=
+			    (CSUM_DATA_VALID | CSUM_PSEUDO_HDR);
+			mbuf->m_pkthdr.csum_data = 0xffff;
 
 			if (cqe->rx_tcp_csum_succeed)
 				do_lro = true;
@@ -1530,9 +1531,20 @@ mana_rx_mbuf(struct mbuf *mbuf, struct mana_rxcomp_oob *cqe,
 
 	do_if_input = true;
 	if ((ndev->if_capenable & IFCAP_LRO) && do_lro) {
+		mana_trc_dbg(NULL, "rxq check 22\n");
+
+#if 0
+		if (rxq->lro.lro_cnt != 0) {
+			int error = tcp_lro_rx(&rxq->lro, mbuf, 0);
+			if (error)
+				mana_trc_dbg(NULL,
+				    "rxq check 25, lro error = %d\n", error);
+		}
+#else
 		if (rxq->lro.lro_cnt != 0 &&
 		    tcp_lro_rx(&rxq->lro, mbuf, 0) == 0)
 			do_if_input = false;
+#endif
 	}
 	if (do_if_input) {
 		mana_trc_dbg(NULL, "rxq check 30\n");
