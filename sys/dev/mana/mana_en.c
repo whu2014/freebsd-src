@@ -641,11 +641,13 @@ mana_tso_fixup(struct mbuf *mbuf)
 		ip->ip_sum = 0;
 		th->th_sum = in_pseudo(ip->ip_src.s_addr,
 		    ip->ip_dst.s_addr, htons(IPPROTO_TCP));
+#if 0
 		mana_trc_dbg(NULL,
 		    "TSO ip_s 0x%x, ip_d 0x%x, TCP porot 0x%x, tcp csum 0x%x, "
 		    "mss = %d\n",
 		    ip->ip_src.s_addr, ip->ip_dst.s_addr, htons(IPPROTO_TCP),
 		    th->th_sum, mbuf->m_pkthdr.tso_segsz);
+#endif
 	} else if (etype == ETHERTYPE_IPV6) {
 		struct ip6_hdr *ip6;
 
@@ -671,9 +673,11 @@ mana_tso_fixup(struct mbuf *mbuf)
 	}
 
 	MANA_L3_PROTO(mbuf) = etype;
+#if 0
 	mana_trc_dbg(NULL, "TSO packet, m_head_s = %d, m_len = %d, "
 	    "l4_offset = %d\n", mbuf->m_pkthdr.len, mbuf->m_len,
 	    mbuf->m_pkthdr.l3hlen);
+#endif
 
 	return (mbuf);
 }
@@ -742,7 +746,7 @@ mana_mbuf_csum_check(struct mbuf *mbuf)
 		/* XXX Should we free the mbuf and return? */
 		//m_freem(mbuf);
 		//return NULL;
-		mana_trc_dbg(NULL, "Packet not IP type.\n");
+		// mana_trc_dbg(NULL, "Packet not IP type.\n");
 		MANA_L4_PROTO(mbuf) = 0;
 		// goto out;
 	}
@@ -1330,11 +1334,13 @@ mana_poll_tx_cq(struct mana_cq *cq)
 
 	next_to_complete = txq->next_to_complete;
 
+#if 0
 	if (comp_read > 15)
 	// if (comp_read)
 		mana_trc_dbg(NULL,
 		    "txq %d complete check 20, comp_read = %d\n",
 		    txq_idx, comp_read);
+#endif
 
 	for (i = 0; i < comp_read; i++) {
 		struct mana_tx_comp_oob *cqe_oob;
@@ -1422,7 +1428,7 @@ mana_poll_tx_cq(struct mana_cq *cq)
 
 	txq->next_to_complete = next_to_complete;
 
-#if 1
+#if 0
 	if (pkt_transmitted > 10)
 		mana_trc_dbg(NULL, "txq %d, next to complete = %d, "
 		"transmitted = %d, wqe unit = %d\n",
