@@ -408,15 +408,15 @@ mana_xmit(struct mana_txq *txq)
 	next_to_use = txq->next_to_use;
 
 	while ((mbuf = drbr_peek(ndev, txq->txq_br)) != NULL) {
-		atomic_inc_return(&txq->pending_sends);
+		//atomic_inc_return(&txq->pending_sends);
 
 		/* Ensure pending_sends update before reading port status */
-		rmb();
+		//rmb();
 
 		if (!apc->port_is_up ||
 		    (if_getdrvflags(ndev) & IFF_DRV_RUNNING) == 0) {
 			drbr_putback(ndev, txq->txq_br, mbuf);
-			atomic_dec_return(&txq->pending_sends);
+			// atomic_dec_return(&txq->pending_sends);
 			break;
 		}
 
@@ -424,7 +424,7 @@ mana_xmit(struct mana_txq *txq)
 
 		if (!mana_can_tx(gdma_sq)) {
 			drbr_putback(ndev, txq->txq_br, mbuf);
-			atomic_dec_return(&txq->pending_sends);
+			// atomic_dec_return(&txq->pending_sends);
 #if 1 /* Must match txqfull_handling */
 			/* SQ is full. Schedule a task to come back later */
 			taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
@@ -452,7 +452,7 @@ mana_xmit(struct mana_txq *txq)
 			m_freem(mbuf);
 			/* Advance the drbr queue */
 			drbr_advance(ndev, txq->txq_br);
-			atomic_dec_return(&txq->pending_sends);
+			// atomic_dec_return(&txq->pending_sends);
 			continue;
 		}
 
@@ -494,6 +494,7 @@ mana_xmit(struct mana_txq *txq)
 			pkg.tx_oob.s_oob.trans_off = mbuf->m_pkthdr.l3hlen;
 
 			pkg.wqe_req.client_data_unit = mbuf->m_pkthdr.tso_segsz;
+			pkg.wqe_req.flags = GDMA_WR_OOB_IN_SGL | GDMA_WR_PAD_BY_SGE0;
 		} else if (mbuf->m_pkthdr.csum_flags &
 		    (CSUM_IP_UDP | CSUM_IP_TCP | CSUM_IP6_UDP | CSUM_IP6_TCP)) {
 			if (MANA_L3_PROTO(mbuf) == ETHERTYPE_IP) {
@@ -544,14 +545,18 @@ mana_xmit(struct mana_txq *txq)
 			mana_tx_unmap_mbuf(apc, tx_info);
 
 			drbr_advance(ndev, txq->txq_br);
-			atomic_dec_return(&txq->pending_sends);
+			//atomic_dec_return(&txq->pending_sends);
 			continue;
 		}
 
+		mb();
+
 		next_to_use =
 		    (next_to_use + 1) % MAX_SEND_BUFFERS_PER_QUEUE;
-#if 1
-		if (txq->next_to_use == 0)
+
+		atomic_inc_return(&txq->pending_sends);
+#if 0
+		if (next_to_use == 0)
 		    mana_trc_dbg(NULL,
 		        "txq %i next_to_use about to wrapped around, "
 			"ntu = %d, ntc = %d\n",
@@ -636,6 +641,11 @@ mana_tso_fixup(struct mbuf *mbuf)
 		ip->ip_sum = 0;
 		th->th_sum = in_pseudo(ip->ip_src.s_addr,
 		    ip->ip_dst.s_addr, htons(IPPROTO_TCP));
+		mana_trc_dbg(NULL,
+		    "TSO ip_s 0x%x, ip_d 0x%x, TCP porot 0x%x, tcp csum 0x%x, "
+		    "mss = %d\n",
+		    ip->ip_src.s_addr, ip->ip_dst.s_addr, htons(IPPROTO_TCP),
+		    th->th_sum, mbuf->m_pkthdr.tso_segsz);
 	} else if (etype == ETHERTYPE_IPV6) {
 		struct ip6_hdr *ip6;
 
@@ -643,6 +653,7 @@ mana_tso_fixup(struct mbuf *mbuf)
 		ip6 = mtodo(mbuf, ehlen);
 		if (ip6->ip6_nxt != IPPROTO_TCP) {
 			/* Realy something wrong, just return */
+			mana_trc_dbg(NULL, "TSO mbuf not TCP, freed.\n");
 			m_freem(mbuf);
 			return NULL;
 		}
@@ -654,11 +665,15 @@ mana_tso_fixup(struct mbuf *mbuf)
 		th->th_sum = in6_cksum_pseudo(ip6, 0, IPPROTO_TCP, 0);
 	} else {
 		/* CSUM_TSO is set but not IP protocol. */
+		mana_trc_dbg(NULL, "TSO mbuf not right, freed.\n");
 		m_freem(mbuf);
 		return NULL;
 	}
 
 	MANA_L3_PROTO(mbuf) = etype;
+	mana_trc_dbg(NULL, "TSO packet, m_head_s = %d, m_len = %d, "
+	    "l4_offset = %d\n", mbuf->m_pkthdr.len, mbuf->m_len,
+	    mbuf->m_pkthdr.l3hlen);
 
 	return (mbuf);
 }
@@ -727,6 +742,7 @@ mana_mbuf_csum_check(struct mbuf *mbuf)
 		/* XXX Should we free the mbuf and return? */
 		//m_freem(mbuf);
 		//return NULL;
+		mana_trc_dbg(NULL, "Packet not IP type.\n");
 		MANA_L4_PROTO(mbuf) = 0;
 		// goto out;
 	}
@@ -769,7 +785,7 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 
 	if (M_HASHTYPE_GET(m) != M_HASHTYPE_NONE) {
 		uint32_t hash = m->m_pkthdr.flowid;
-		// mana_trc_dbg(NULL, "txq check 33, hash = 0x%x\n", hash);
+		 //mana_trc_dbg(NULL, "txq check 33, hash = 0x%x\n", hash);
 		txq_id = apc->indir_table[hash & MANA_INDIRECT_TABLE_MASK] %
 		    apc->num_queues;
 	} else {
@@ -1297,6 +1313,8 @@ mana_poll_tx_cq(struct mana_cq *cq)
 	int comp_read;
 	int txq_idx = txq->idx;;
 	int i;
+	int sa_drop = 0;
+
 #if 0 /* txqfull_handling */
 	struct gdma_queue *gdma_wq;
 	unsigned int avail_space;
@@ -1313,6 +1331,7 @@ mana_poll_tx_cq(struct mana_cq *cq)
 	next_to_complete = txq->next_to_complete;
 
 	if (comp_read > 15)
+	// if (comp_read)
 		mana_trc_dbg(NULL,
 		    "txq %d complete check 20, comp_read = %d\n",
 		    txq_idx, comp_read);
@@ -1347,10 +1366,12 @@ mana_poll_tx_cq(struct mana_cq *cq)
 		case CQE_TX_VPORT_IDX_OUT_OF_RANGE:
 		case CQE_TX_VPORT_DISABLED:
 		case CQE_TX_VLAN_TAGGING_VIOLATION:
+			sa_drop ++;
 			mana_trc_err(NULL,
-			    "TX: txq %d CQE error %d, ntc = %d: err ignored.\n",
+			    "TX: txq %d CQE error %d, ntc = %d, "
+			    "pending sends = %d: err ignored.\n",
 			    txq_idx, cqe_oob->cqe_hdr.cqe_type,
-			    next_to_complete);
+			    next_to_complete, txq->pending_sends);
 			break;
 
 		default:
@@ -1377,9 +1398,12 @@ mana_poll_tx_cq(struct mana_cq *cq)
 		if (!tx_info->mbuf) {
 			mana_trc_err(NULL,
 			    "WARNING: txq %d Empty mbuf on tx_info: %u, "
-			    "ntu = %u\n",
-			    txq_idx, next_to_complete, txq->next_to_use);
-			break;
+			    "ntu = %u, pending_sends = %d, "
+			    "transmitted = %d, sa_drop = %d, i = %d, comp_read = %d\n",
+			    txq_idx, next_to_complete, txq->next_to_use,
+			    txq->pending_sends, pkt_transmitted, sa_drop,
+			    i, comp_read);
+			continue;
 		}
 
 		wqe_info = &tx_info->wqe_inf;
