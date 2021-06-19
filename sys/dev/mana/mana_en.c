@@ -385,6 +385,8 @@ mana_unload_rx_mbuf(struct mana_port_context *apc, struct mana_rxq *rxq,
 #define MANA_L3_PROTO(_mbuf)	((_mbuf)->m_pkthdr.PH_loc.sixteen[0])
 #define MANA_L4_PROTO(_mbuf)	((_mbuf)->m_pkthdr.PH_loc.sixteen[1])
 
+#define MANA_TXQ_FULL	(IFF_DRV_RUNNING | IFF_DRV_OACTIVE)
+
 static void
 mana_xmit(struct mana_txq *txq)
 {
@@ -398,11 +400,13 @@ mana_xmit(struct mana_txq *txq)
 	struct mana_tx_package pkg = {};
 	struct mana_stats *tx_stats;
 	struct gdma_queue *gdma_sq;
+	struct gdma_queue *gdma_eq;
 	struct mana_cq *cq;
 	int err, len;
 
 	gdma_sq = txq->gdma_sq;
 	cq = &apc->tx_qp[txq->idx].tx_cq;
+	gdma_eq = cq->gdma_cq->cq.parent;
 	tx_stats = &txq->stats;
 
 	next_to_use = txq->next_to_use;
@@ -414,7 +418,7 @@ mana_xmit(struct mana_txq *txq)
 		//rmb();
 
 		if (!apc->port_is_up ||
-		    (if_getdrvflags(ndev) & IFF_DRV_RUNNING) == 0) {
+		    (if_getdrvflags(ndev) & MANA_TXQ_FULL) != IFF_DRV_RUNNING) {
 			drbr_putback(ndev, txq->txq_br, mbuf);
 			// atomic_dec_return(&txq->pending_sends);
 			break;
@@ -423,16 +427,38 @@ mana_xmit(struct mana_txq *txq)
 		// mana_trc_dbg(NULL, "check 10\n");
 
 		if (!mana_can_tx(gdma_sq)) {
-			drbr_putback(ndev, txq->txq_br, mbuf);
+#if 0 /* Must match txqfull_handling */
+			// drbr_putback(ndev, txq->txq_br, mbuf);
+
+			mana_trc_dbg(NULL, "no enough spc on txq %d, %d\n",
+			    txq->idx, mana_gd_wq_avail_space(gdma_sq));
 			// atomic_dec_return(&txq->pending_sends);
-#if 1 /* Must match txqfull_handling */
 			/* SQ is full. Schedule a task to come back later */
-			taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
+			// taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
+			break;
 #else
 			/* SQ is full. Set the IFF_DRV_OACTIVE flag */
 			if_setdrvflagbits(apc->ndev, IFF_DRV_OACTIVE, 0);
+			mb();
+			/* Re_check and wake up if needed */
+			if (mana_can_tx(gdma_sq)) {
+				if_setdrvflagbits(apc->ndev, 0,
+				    IFF_DRV_OACTIVE);
+			} else {
+#if 0
+				mana_trc_dbg(NULL,
+				    "no enough spc on txq %d, %d\n",
+				    txq->idx, mana_gd_wq_avail_space(gdma_sq));
 #endif
-			break;
+
+				drbr_putback(ndev, txq->txq_br, mbuf);
+				mb();
+				/* Scehculde a cleanup task for wakeup */
+				taskqueue_enqueue(gdma_eq->eq.cleanup_tq,
+				    &gdma_eq->eq.cleanup_task);
+				break;
+			}
+#endif
 		}
 
 		// mana_trc_dbg(NULL, "check 20\n");
@@ -588,7 +614,7 @@ mana_xmit_taskfunc(void *arg, int pending)
 	struct mana_port_context *apc = if_getsoftc(ndev);
 
 	while (!drbr_empty(ndev, txq->txq_br) && apc->port_is_up &&
-	    (if_getdrvflags(ndev) & IFF_DRV_RUNNING)) {
+	    (if_getdrvflags(ndev) & MANA_TXQ_FULL) == IFF_DRV_RUNNING) {
 		mtx_lock(&txq->txq_mtx);
 		mana_xmit(txq);
 		mtx_unlock(&txq->txq_mtx);
@@ -792,8 +818,17 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 		 //mana_trc_dbg(NULL, "txq check 33, hash = 0x%x\n", hash);
 		txq_id = apc->indir_table[hash & MANA_INDIRECT_TABLE_MASK] %
 		    apc->num_queues;
+#if 0
+		mana_trc_dbg(NULL, "$$$$$ chose txq %u for hash: 0x%x\n",
+		    txq_id, hash);
+#endif
+
 	} else {
 		txq_id = m->m_pkthdr.flowid % apc->num_queues;
+#if 0
+		mana_trc_dbg(NULL, "----- chose txq %u for flowid: 0x%x\n",
+		    txq_id, m->m_pkthdr.flowid);
+#endif
 	}
 
 	txq = &apc->tx_qp[txq_id].txq;
@@ -810,7 +845,8 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 	is_drbr_empty = drbr_empty(ifp, txq->txq_br);
 	err = drbr_enqueue(ifp, txq->txq_br, m);
 	if (unlikely(err)) {
-		mana_trc_dbg(NULL, "txq %u failed to enqueue\n", txq_id);
+		mana_trc_dbg(NULL, "txq %u failed to enqueue: %d\n",
+		    txq_id, err);
 		taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
 		return err;
 	}
@@ -821,9 +857,25 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 		// mana_trc_dbg(NULL, "txq check 60, after calling mana_xmit\n");
 		mtx_unlock(&txq->txq_mtx);
 	} else {
+#if 0
 		mana_trc_dbg(NULL,
-		    "dbdr not empty on txq %u failed to enqueue, "
+		    "dbdr not empty on txq %u, "
 		    "send task scheduled\n", txq_id);
+#endif
+#if 0
+		if ((if_getdrvflags(ifp) & MANA_TXQ_FULL) == MANA_TXQ_FULL) {
+			struct gdma_queue *gdma_wq = txq->gdma_sq;
+			uint32_t avail_space = mana_gd_wq_avail_space(gdma_wq);
+			if (apc->port_is_up &&
+			    avail_space >= MAX_TX_WQE_SIZE) {
+				/* Clear the Q full flag */
+				if_setdrvflagbits(ifp, 0, IFF_DRV_OACTIVE);
+				/* Schedule a tx enqueue task */
+				taskqueue_enqueue(txq->enqueue_tq,
+				    &txq->enqueue_task);
+			}
+		}
+#endif
 		taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
 		// mana_trc_dbg(NULL, "txq check 70, after calling taskqueue_enqueue\n");
 	}
@@ -1300,8 +1352,6 @@ mana_move_wq_tail(struct gdma_queue *wq, uint32_t num_units)
 	return 0;
 }
 
-#define MANA_TXQ_FULL	(IFF_DRV_RUNNING | IFF_DRV_OACTIVE)
-
 static void
 mana_poll_tx_cq(struct mana_cq *cq)
 {
@@ -1319,7 +1369,7 @@ mana_poll_tx_cq(struct mana_cq *cq)
 	int i;
 	int sa_drop = 0;
 
-#if 0 /* txqfull_handling */
+#if 1 /* txqfull_handling */
 	struct gdma_queue *gdma_wq;
 	unsigned int avail_space;
 	bool txq_full = false;
@@ -1445,13 +1495,14 @@ mana_poll_tx_cq(struct mana_cq *cq)
 
 	mana_move_wq_tail(txq->gdma_sq, wqe_unit_cnt);
 
-#if 1 /* Must match with txqfull_handling */
+	/* Ensure tail updated before checking q stop */
+	wmb();
+
+#if 0 /* Must match with txqfull_handling */
 #else
 	gdma_wq = txq->gdma_sq;
 	avail_space = mana_gd_wq_avail_space(gdma_wq);
 
-	/* Ensure tail updated before checking q stop */
-	wmb();
 
 	if ((if_getdrvflags(ndev) & MANA_TXQ_FULL) == MANA_TXQ_FULL) {
 		txq_full = true;
@@ -1463,15 +1514,19 @@ mana_poll_tx_cq(struct mana_cq *cq)
 	if (txq_full && apc->port_is_up && avail_space >= MAX_TX_WQE_SIZE) {
 		/* Grab the txq lock and re-test */
 		mtx_lock(&txq->txq_mtx);
+		avail_space = mana_gd_wq_avail_space(gdma_wq);
+
 		if ((if_getdrvflags(ndev) & MANA_TXQ_FULL) == MANA_TXQ_FULL &&
 		    apc->port_is_up && avail_space >= MAX_TX_WQE_SIZE) {
 			/* Clear the Q full flag */
-			if_setdrvflagbits(apc->ndev, 0, IFF_DRV_OACTIVE);
+			if_setdrvflagbits(apc->ndev, IFF_DRV_RUNNING,
+			    IFF_DRV_OACTIVE);
+			rmb();
 			/* Schedule a tx enqueue task */
 			taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
+			// apc->eth_stats.wake_queue++;
 		}
 		mtx_unlock(&txq->txq_mtx);
-		// apc->eth_stats.wake_queue++;
 	}
 #endif
 
@@ -1999,7 +2054,7 @@ mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
 		    "mana:tx(%d)", i);
 		mtx_init(&txq->txq_mtx, txq->txq_mtx_name, NULL, MTX_DEF);
 
-		txq->txq_br = buf_ring_alloc(MAX_SEND_BUFFERS_PER_QUEUE,
+		txq->txq_br = buf_ring_alloc(2 * MAX_SEND_BUFFERS_PER_QUEUE,
 		    M_DEVBUF, M_WAITOK, &txq->txq_mtx);
 		if (unlikely(txq->txq_br == NULL)) {
 			if_printf(net,

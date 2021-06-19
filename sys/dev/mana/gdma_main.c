@@ -647,8 +647,10 @@ mana_poll(void *arg, int pending)
 		 * so it will arm the EQ any way.
 		 */
 		if (i == (MANA_POLL_BUDGET - 1)) {
+#if 0
 			mana_trc_dbg(NULL,
 			    "mana poll in last loop i = %d\n", i);
+#endif
 			eq->eq.budget = CQE_POLLING_BUFFER + 1;
 		}
 
