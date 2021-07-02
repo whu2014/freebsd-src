@@ -439,17 +439,22 @@ mana_xmit(struct mana_txq *txq)
 #else
 			/* SQ is full. Set the IFF_DRV_OACTIVE flag */
 			if_setdrvflagbits(apc->ndev, IFF_DRV_OACTIVE, 0);
+
+			drbr_putback(ndev, txq->txq_br, mbuf);
+
+			taskqueue_enqueue(gdma_eq->eq.cleanup_tq,
+			    &gdma_eq->eq.cleanup_task);
+			break;
+#if 0
 			mb();
 			/* Re_check and wake up if needed */
 			if (mana_can_tx(gdma_sq)) {
 				if_setdrvflagbits(apc->ndev, 0,
 				    IFF_DRV_OACTIVE);
 			} else {
-#if 0
 				mana_trc_dbg(NULL,
 				    "no enough spc on txq %d, %d\n",
 				    txq->idx, mana_gd_wq_avail_space(gdma_sq));
-#endif
 
 				drbr_putback(ndev, txq->txq_br, mbuf);
 				mb();
@@ -458,6 +463,7 @@ mana_xmit(struct mana_txq *txq)
 				    &gdma_eq->eq.cleanup_task);
 				break;
 			}
+#endif
 #endif
 		}
 
@@ -575,7 +581,7 @@ mana_xmit(struct mana_txq *txq)
 			continue;
 		}
 
-		mb();
+		// mb();
 
 		next_to_use =
 		    (next_to_use + 1) % MAX_SEND_BUFFERS_PER_QUEUE;
@@ -648,7 +654,7 @@ mana_tso_fixup(struct mbuf *mbuf)
 		etype = ntohs(eh->evl_encap_proto);
 		ehlen = ETHER_HDR_LEN;
 	}
-	mbuf->m_pkthdr.l2hlen = ehlen;
+	// mbuf->m_pkthdr.l2hlen = ehlen;
 
 
 	if (etype == ETHERTYPE_IP) {
@@ -727,7 +733,7 @@ mana_mbuf_csum_check(struct mbuf *mbuf)
 		etype = ntohs(eh->evl_encap_proto);
 		ehlen = ETHER_HDR_LEN;
 	}
-	mbuf->m_pkthdr.l2hlen = ehlen;
+	//mbuf->m_pkthdr.l2hlen = ehlen;
 
 	mbuf_next = m_getptr(mbuf, ehlen, &offset);
 
@@ -814,10 +820,15 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 	// mana_trc_dbg(NULL, "txq check 30\n");
 
 	if (M_HASHTYPE_GET(m) != M_HASHTYPE_NONE) {
+#if 0
+		txq_id = curcpu % apc->num_queues;
+#else
+		// uint8_t *hash_byte = (uint8_t *) &m->m_pkthdr.flowid;
 		uint32_t hash = m->m_pkthdr.flowid;
 		 //mana_trc_dbg(NULL, "txq check 33, hash = 0x%x\n", hash);
-		txq_id = apc->indir_table[hash & MANA_INDIRECT_TABLE_MASK] %
+		txq_id = apc->indir_table[(hash) & MANA_INDIRECT_TABLE_MASK] %
 		    apc->num_queues;
+#endif
 #if 0
 		mana_trc_dbg(NULL, "$$$$$ chose txq %u for hash: 0x%x\n",
 		    txq_id, hash);
@@ -2054,7 +2065,7 @@ mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
 		    "mana:tx(%d)", i);
 		mtx_init(&txq->txq_mtx, txq->txq_mtx_name, NULL, MTX_DEF);
 
-		txq->txq_br = buf_ring_alloc(2 * MAX_SEND_BUFFERS_PER_QUEUE,
+		txq->txq_br = buf_ring_alloc(4 * MAX_SEND_BUFFERS_PER_QUEUE,
 		    M_DEVBUF, M_WAITOK, &txq->txq_mtx);
 		if (unlikely(txq->txq_br == NULL)) {
 			if_printf(net,
