@@ -46,3 +46,48 @@ SYSCTL_INT(_hw_mana, OID_AUTO, log_level, CTLFLAG_RWTUN,
 
 SYSCTL_CONST_STRING(_hw_mana, OID_AUTO, driver_version, CTLFLAG_RD,
     DRV_MODULE_VERSION, "MANA driver version");
+
+void
+mana_sysctl_add_port(struct mana_port_context *apc)
+{
+	struct gdma_context *gc = apc->ac->gdma_dev->gdma_context;
+	device_t dev = gc->dev;
+	struct sysctl_ctx_list *ctx;
+	struct sysctl_oid *tree;
+	struct sysctl_oid_list *child;
+	struct mana_port_stats *port_stats;
+	char node_name[32];
+
+	struct sysctl_oid *port_node, *stats_node;
+	struct sysctl_oid_list *stats_list;
+
+	ctx = device_get_sysctl_ctx(dev);
+	tree = device_get_sysctl_tree(dev);
+	child = SYSCTL_CHILDREN(tree);
+
+	port_stats = &apc->port_stats;
+
+	snprintf(node_name, 32, "port%d", apc->port_idx);
+
+	port_node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO,
+	    node_name, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Port Name");
+	apc->port_list = SYSCTL_CHILDREN(port_node);
+
+	stats_node = SYSCTL_ADD_NODE(ctx, apc->port_list, OID_AUTO,
+	    "port_stats", CTLFLAG_RD | CTLFLAG_MPSAFE, NULL,
+	    "Statistics of port");
+	stats_list = SYSCTL_CHILDREN(stats_node);
+
+	SYSCTL_ADD_COUNTER_U64(ctx, stats_list, OID_AUTO, "rx_packets",
+	    CTLFLAG_RD, &port_stats->rx_packets, "Packets received");
+	SYSCTL_ADD_COUNTER_U64(ctx, stats_list, OID_AUTO, "tx_packets",
+	    CTLFLAG_RD, &port_stats->tx_packets, "Packets transmitted");
+	SYSCTL_ADD_COUNTER_U64(ctx, stats_list, OID_AUTO, "rx_bytes",
+	    CTLFLAG_RD, &port_stats->rx_bytes, "Bytes received");
+	SYSCTL_ADD_COUNTER_U64(ctx, stats_list, OID_AUTO, "tx_bytes",
+	    CTLFLAG_RD, &port_stats->tx_bytes, "Bytes transmitted");
+	SYSCTL_ADD_COUNTER_U64(ctx, stats_list, OID_AUTO, "rx_drops",
+	    CTLFLAG_RD, &port_stats->rx_drops, "Receive packet drops");
+	SYSCTL_ADD_COUNTER_U64(ctx, stats_list, OID_AUTO, "tx_drops",
+	    CTLFLAG_RD, &port_stats->tx_drops, "Transmit packet drops");
+}

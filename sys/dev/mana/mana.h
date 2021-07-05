@@ -37,6 +37,7 @@
 #include <sys/types.h>
 #include <sys/proc.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
 #include <sys/taskqueue.h>
 #include <sys/counter.h>
 
@@ -427,9 +428,18 @@ struct mana_tx_qp {
 	mana_handle_t			tx_object;
 };
 
-struct mana_ethtool_stats {
-	uint64_t		stop_queue;
-	uint64_t		wake_queue;
+struct mana_port_stats {
+	counter_u64_t		rx_packets;
+	counter_u64_t		tx_packets;
+
+	counter_u64_t		rx_bytes;
+	counter_u64_t		tx_bytes;
+
+	counter_u64_t		rx_drops;
+	counter_u64_t		tx_drops;
+
+	counter_u64_t		stop_queue;
+	counter_u64_t		wake_queue;
 };
 
 struct mana_context {
@@ -486,7 +496,10 @@ struct mana_port_context {
 	bool			port_is_up;
 	bool			port_st_save; /* Saved port state */
 
-	struct mana_ethtool_stats eth_stats;
+	struct mana_port_stats	port_stats;
+
+	struct sysctl_oid_list	*port_list;
+	struct sysctl_ctx_list	que_sysctl_ctx;
 };
 
 #define MANA_APC_LOCK_INIT(apc)			\

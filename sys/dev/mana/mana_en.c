@@ -41,7 +41,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/smp.h>
 #include <sys/socket.h>
 #include <sys/sockio.h>
-#include <sys/sysctl.h>
 #include <sys/time.h>
 #include <sys/eventhandler.h>
 
@@ -69,6 +68,7 @@ __FBSDID("$FreeBSD$");
 #include <netinet/udp.h>
 
 #include "mana.h"
+#include "mana_sysctl.h"
 
 static int mana_up(struct mana_port_context *apc);
 static int mana_down(struct mana_port_context *apc);
@@ -395,7 +395,9 @@ mana_xmit(struct mana_txq *txq)
 	struct ifnet *ndev = txq->ndev;
 	struct mbuf *mbuf;
 	struct mana_port_context *apc = if_getsoftc(ndev);
+	struct mana_port_stats *port_stats = &apc->port_stats;
 	struct gdma_dev *gd = apc->ac->gdma_dev;
+	uint64_t packets, bytes;
 	uint16_t next_to_use;
 	struct mana_tx_package pkg = {};
 	struct mana_stats *tx_stats;
@@ -409,6 +411,8 @@ mana_xmit(struct mana_txq *txq)
 	gdma_eq = cq->gdma_cq->cq.parent;
 	tx_stats = &txq->stats;
 
+	packets = 0;
+	bytes = 0;
 	next_to_use = txq->next_to_use;
 
 	while ((mbuf = drbr_peek(ndev, txq->txq_br)) != NULL) {
@@ -599,11 +603,16 @@ mana_xmit(struct mana_txq *txq)
 
 		mana_gd_wq_ring_doorbell(gd->gdma_context, gdma_sq);
 
-		counter_enter();
-		counter_u64_add_protected(tx_stats->packets, 1);
-		counter_u64_add_protected(tx_stats->bytes, len);
-		counter_exit();
+		packets ++;
+		bytes += len;
 	}
+
+	counter_enter();
+	counter_u64_add_protected(tx_stats->packets, packets);
+	counter_u64_add_protected(port_stats->tx_packets, packets);
+	counter_u64_add_protected(tx_stats->bytes, bytes);
+	counter_u64_add_protected(port_stats->tx_bytes, bytes);
+	counter_exit();
 
 	txq->next_to_use = next_to_use;
 #if 0
@@ -903,6 +912,9 @@ mana_cleanup_port_context(struct mana_port_context *apc)
 
 	free(apc->rxqs, M_DEVBUF);
 	apc->rxqs = NULL;
+
+	mana_free_counters((counter_u64_t *)&apc->port_stats,
+	    sizeof(struct mana_port_stats));
 }
 
 static int
@@ -1699,7 +1711,9 @@ mana_rx_mbuf(struct mbuf *mbuf, struct mana_rxcomp_oob *cqe,
 
 	counter_enter();
 	counter_u64_add_protected(rx_stats->packets, 1);
+	counter_u64_add_protected(apc->port_stats.rx_packets, 1);
 	counter_u64_add_protected(rx_stats->bytes, pkt_len);
+	counter_u64_add_protected(apc->port_stats.rx_bytes, pkt_len);
 	counter_exit();
 }
 
@@ -2770,6 +2784,11 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 	ifmedia_set(&apc->media, IFM_ETHER | IFM_AUTO);
 
 	ether_ifattach(ndev, apc->mac_addr);
+
+	/* Initialize statistics */
+	mana_alloc_counters((counter_u64_t *)&apc->port_stats,
+	    sizeof(struct mana_port_stats));
+	mana_sysctl_add_port(apc);
 
 	/* Tell the stack that the interface is not active */
 	if_setdrvflagbits(ndev, IFF_DRV_OACTIVE, IFF_DRV_RUNNING);

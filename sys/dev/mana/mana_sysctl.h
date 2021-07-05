@@ -41,5 +41,6 @@
 
 #include "mana.h"
 
+void  mana_sysctl_add_port(struct mana_port_context *apc);
 
 #endif /* !(MANA_SYSCTL_H) */
