@@ -249,7 +249,8 @@ mana_can_tx(struct gdma_queue *wq)
 static inline int
 mana_tx_map_mbuf(struct mana_port_context *apc,
     struct mana_send_buf_info *tx_info,
-    struct mbuf **m_head, struct mana_tx_package *tp)
+    struct mbuf **m_head, struct mana_tx_package *tp,
+    struct mana_stats *tx_stats)
 {
 	struct gdma_dev *gd = apc->ac->gdma_dev;
 	bus_dma_segment_t segs[MAX_MBUF_FRAGS];
@@ -261,11 +262,14 @@ mana_tx_map_mbuf(struct mana_port_context *apc,
 	if (err == EFBIG) {
 		struct mbuf *m_new;
 
+		counter_u64_add(tx_stats->collapse, 1);
 		m_new = m_collapse(m, M_NOWAIT, MAX_MBUF_FRAGS);
-		if (m_new == NULL)
+		if (unlikely(m_new == NULL)) {
+			counter_u64_add(tx_stats->collapse_err, 1);
 			return ENOBUFS;
-		else
+		} else {
 			*m_head = m = m_new;
+		}
 
 		mana_trc_dbg(NULL,
 		    "Too many segs in orig mbuf, m_collapse called\n");
@@ -347,6 +351,7 @@ mana_load_rx_mbuf(struct mana_port_context *apc, struct mana_rxq *rxq,
 	if (unlikely((err != 0) || (nsegs != 1))) {
 		mana_trc_dbg(NULL, "Failed to map mbuf, error: %d, "
 		    "nsegs: %d\n", err, nsegs);
+		counter_u64_add(rxq->stats.dma_mapping_err, 1);
 		goto error;
 	}
 
@@ -443,6 +448,7 @@ mana_xmit(struct mana_txq *txq)
 #else
 			/* SQ is full. Set the IFF_DRV_OACTIVE flag */
 			if_setdrvflagbits(apc->ndev, IFF_DRV_OACTIVE, 0);
+			counter_u64_add(tx_stats->stop, 1);
 
 			drbr_putback(ndev, txq->txq_br, mbuf);
 
@@ -479,10 +485,12 @@ mana_xmit(struct mana_txq *txq)
 		memset(&pkg, 0, sizeof(struct mana_tx_package));
 		pkg.wqe_req.sgl = pkg.sgl_array;
 
-		err = mana_tx_map_mbuf(apc, tx_info, &mbuf, &pkg);
+		err = mana_tx_map_mbuf(apc, tx_info, &mbuf, &pkg, tx_stats);
 		if (unlikely(err)) {
 			mana_trc_dbg(NULL,
 			    "Failed to map tx mbuf, err %d\n", err);
+
+			counter_u64_add(tx_stats->dma_mapping_err, 1);
 
 			/* The mbuf is still there. Free it */
 			m_freem(mbuf);
@@ -603,7 +611,7 @@ mana_xmit(struct mana_txq *txq)
 
 		mana_gd_wq_ring_doorbell(gd->gdma_context, gdma_sq);
 
-		packets ++;
+		packets++;
 		bytes += len;
 	}
 
@@ -813,6 +821,9 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 	if (m->m_pkthdr.csum_flags & CSUM_TSO) {
 		m = mana_tso_fixup(m);
 		if (unlikely(m == NULL)) {
+			counter_enter();
+			counter_u64_add_protected(apc->port_stats.tx_drops, 1);
+			counter_exit();
 			return EIO;
 		}
 #if 0
@@ -823,6 +834,9 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 #endif
 		m = mana_mbuf_csum_check(m);
 		if (unlikely(m == NULL)) {
+			counter_enter();
+			counter_u64_add_protected(apc->port_stats.tx_drops, 1);
+			counter_exit();
 			return EIO;
 		}
 	}
@@ -1544,6 +1558,7 @@ mana_poll_tx_cq(struct mana_cq *cq)
 			/* Clear the Q full flag */
 			if_setdrvflagbits(apc->ndev, IFF_DRV_RUNNING,
 			    IFF_DRV_OACTIVE);
+			counter_u64_add(txq->stats.wakeup, 1);
 			rmb();
 			/* Schedule a tx enqueue task */
 			taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
@@ -1784,6 +1799,7 @@ mana_process_rx_cqe(struct mana_rxq *rxq, struct mana_cq *cq,
 		mana_trc_dbg(NULL,
 		    "**** failed to load rx mbuf, err = %d, packet dropped.\n",
 		    err);
+		counter_u64_add(rxq->stats.mbuf_alloc_fail, 1);
 		/*
 		 * Failed to load new mbuf, rxbuf_oob->mbuf is still
 		 * pointing to the old one. Drop the packet.
@@ -2560,6 +2576,10 @@ mana_up(struct mana_port_context *apc)
 		return err;
 	}
 #endif
+
+	/* Add queue specific sysctl */
+	mana_sysctl_add_queues(apc);
+
 	apc->port_is_up = true;
 
 	/* Ensure port state updated before txq state */
@@ -2660,6 +2680,8 @@ mana_down(struct mana_port_context *apc)
 		if_setdrvflagbits(apc->ndev, IFF_DRV_OACTIVE,
 		    IFF_DRV_RUNNING);
 		if_link_state_change(apc->ndev, LINK_STATE_DOWN);
+
+		mana_sysctl_free_queues(apc);
 
 		err = mana_dealloc_queues(apc->ndev);
 		if (err) {

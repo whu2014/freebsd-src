@@ -91,3 +91,82 @@ mana_sysctl_add_port(struct mana_port_context *apc)
 	SYSCTL_ADD_COUNTER_U64(ctx, stats_list, OID_AUTO, "tx_drops",
 	    CTLFLAG_RD, &port_stats->tx_drops, "Transmit packet drops");
 }
+
+void
+mana_sysctl_add_queues(struct mana_port_context *apc)
+{
+	struct sysctl_ctx_list *ctx = &apc->que_sysctl_ctx;
+	struct sysctl_oid_list *child = apc->port_list;
+
+	struct sysctl_oid *queue_node, *tx_node, *rx_node;
+	struct sysctl_oid_list *queue_list, *tx_list, *rx_list;
+	struct mana_txq *txq;
+	struct mana_rxq *rxq;
+	struct mana_stats *tx_stats, *rx_stats;
+	char que_name[32];
+	int i;
+
+	sysctl_ctx_init(ctx);
+
+	for (i = 0; i < apc->num_queues; i++) {
+		rxq = apc->rxqs[i];
+		txq = &apc->tx_qp[i].txq;
+
+		snprintf(que_name, 32, "queue%d", i);
+
+		queue_node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO,
+		    que_name, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Queue Name");
+		queue_list = SYSCTL_CHILDREN(queue_node);
+
+		/* TX stats */
+		tx_node = SYSCTL_ADD_NODE(ctx, queue_list, OID_AUTO,
+		    "txq", CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "TX queue");
+		tx_list = SYSCTL_CHILDREN(tx_node);
+
+		tx_stats = &txq->stats;
+
+		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO, "count",
+		    CTLFLAG_RD, &tx_stats->packets, "Packets sent");
+		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO, "bytes",
+		    CTLFLAG_RD, &tx_stats->bytes, "Bytes sent");
+		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO, "queue_wakeups",
+		    CTLFLAG_RD, &tx_stats->wakeup, "Queue wakeups");
+		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO, "queue_stops",
+		    CTLFLAG_RD, &tx_stats->stop, "Queue stops");
+		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO, "mbuf_collapse",
+		    CTLFLAG_RD, &tx_stats->collapse, "Mbuf collapse count");
+		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO,
+		    "mbuf_collapse_err", CTLFLAG_RD,
+		    &tx_stats->collapse_err, "Mbuf collapse failures");
+		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO,
+		    "dma_mapping_err", CTLFLAG_RD,
+		    &tx_stats->dma_mapping_err, "DMA mapping failures");
+
+		/* RX stats */
+		rx_node = SYSCTL_ADD_NODE(ctx, queue_list, OID_AUTO,
+		    "rxq", CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "RX queue");
+		rx_list = SYSCTL_CHILDREN(rx_node);
+
+		rx_stats = &rxq->stats;
+
+		SYSCTL_ADD_COUNTER_U64(ctx, rx_list, OID_AUTO, "count",
+		    CTLFLAG_RD, &rx_stats->packets, "Packets received");
+		SYSCTL_ADD_COUNTER_U64(ctx, rx_list, OID_AUTO, "bytes",
+		    CTLFLAG_RD, &rx_stats->bytes, "Bytes received");
+		SYSCTL_ADD_COUNTER_U64(ctx, rx_list, OID_AUTO,
+		    "mbuf_alloc_fail", CTLFLAG_RD,
+		    &rx_stats->mbuf_alloc_fail, "Failed mbuf allocs");
+		SYSCTL_ADD_COUNTER_U64(ctx, rx_list, OID_AUTO,
+		    "dma_mapping_err", CTLFLAG_RD,
+		    &rx_stats->dma_mapping_err, "DMA mapping errors");
+	}
+}
+
+/*
+ * Free all queues' sysctl trees attached to the port's tree.
+ */
+void
+mana_sysctl_free_queues(struct mana_port_context *apc)
+{
+	sysctl_ctx_free(&apc->que_sysctl_ctx);
+}

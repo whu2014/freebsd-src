@@ -131,8 +131,14 @@ struct mana_send_buf_info {
 };
 
 struct mana_stats {
-	counter_u64_t			packets;
-	counter_u64_t			bytes;
+	counter_u64_t			packets;		/* rx, tx */
+	counter_u64_t			bytes;			/* rx, tx */
+	counter_u64_t			stop;			/* tx */
+	counter_u64_t			wakeup;			/* tx */
+	counter_u64_t			collapse;		/* tx */
+	counter_u64_t			collapse_err;		/* tx */
+	counter_u64_t			dma_mapping_err;	/* rx, tx */
+	counter_u64_t			mbuf_alloc_fail;	/* rx */
 };
 
 struct mana_txq {
