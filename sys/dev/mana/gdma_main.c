@@ -719,6 +719,7 @@ mana_gd_register_irq(struct gdma_queue *queue,
 	gic = &gc->irq_contexts[msi_index];
 
 	if (is_mana) {
+		struct mana_port_context *apc = if_getsoftc(spec->eq.ndev);
 		queue->eq.do_not_ring_db = false;
 
 		NET_TASK_INIT(&queue->eq.cleanup_task, 0, mana_poll, queue);
@@ -736,17 +737,19 @@ mana_gd_register_irq(struct gdma_queue *queue,
 		 * the task here. Otherwise, test eq will have no
 		 * handler.
 		 */
-#if 0
-		cpuset_t cpu_mask;
-		CPU_SETOF(queue->eq.cpu, &cpu_mask);
-		taskqueue_start_threads_cpuset(&queue->eq.cleanup_tq,
-		    1, PI_NET, &cpu_mask,
-		    "mana eq poll msix %u on cpu %d",
-		    msi_index, queue->eq.cpu);
+#if 1
+		if (apc->bind_cleanup_thread_cpu) {
+			cpuset_t cpu_mask;
+			CPU_SETOF(queue->eq.cpu, &cpu_mask);
+			taskqueue_start_threads_cpuset(&queue->eq.cleanup_tq,
+			    1, PI_NET, &cpu_mask,
+			    "mana eq poll msix %u on cpu %d",
+			    msi_index, queue->eq.cpu);
+		} else {
 
-#else
-		taskqueue_start_threads(&queue->eq.cleanup_tq, 1, PI_NET,
-		    "mana eq poll on msix %u", msi_index);
+			taskqueue_start_threads(&queue->eq.cleanup_tq, 1,
+			    PI_NET, "mana eq poll on msix %u", msi_index);
+		}
 #endif
 	}
 

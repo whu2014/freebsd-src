@@ -33,6 +33,8 @@ __FBSDID("$FreeBSD$");
 
 #include "mana_sysctl.h"
 
+static int mana_sysctl_cleanup_thread_cpu(SYSCTL_HANDLER_ARGS);
+
 int mana_log_level = MANA_ALERT | MANA_WARNING | MANA_INFO | MANA_DBG;
 
 SYSCTL_NODE(_hw, OID_AUTO, mana, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
@@ -72,6 +74,16 @@ mana_sysctl_add_port(struct mana_port_context *apc)
 	port_node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO,
 	    node_name, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Port Name");
 	apc->port_list = SYSCTL_CHILDREN(port_node);
+
+	SYSCTL_ADD_BOOL(ctx, apc->port_list, OID_AUTO,
+	    "enable_altq", CTLFLAG_RW, &apc->enable_tx_altq, 0,
+	    "Choose alternative txq under heavy load");
+
+	SYSCTL_ADD_PROC(ctx, apc->port_list, OID_AUTO,
+	    "bind_cleanup_thread_cpu",
+	    CTLTYPE_U8 | CTLFLAG_RW | CTLFLAG_MPSAFE,
+	    apc, 0, mana_sysctl_cleanup_thread_cpu, "I",
+	    "Bind cleanup thread to a cpu. 0 disables it.");
 
 	stats_node = SYSCTL_ADD_NODE(ctx, apc->port_list, OID_AUTO,
 	    "port_stats", CTLFLAG_RD | CTLFLAG_MPSAFE, NULL,
@@ -141,6 +153,12 @@ mana_sysctl_add_queues(struct mana_port_context *apc)
 		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO,
 		    "dma_mapping_err", CTLFLAG_RD,
 		    &tx_stats->dma_mapping_err, "DMA mapping failures");
+		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO,
+		    "alt_chg", CTLFLAG_RD,
+		    &tx_stats->alt_chg, "Switch to alternative txq");
+		SYSCTL_ADD_COUNTER_U64(ctx, tx_list, OID_AUTO,
+		    "alt_reset", CTLFLAG_RD,
+		    &tx_stats->alt_reset, "Reset to self txq");
 
 		/* RX stats */
 		rx_node = SYSCTL_ADD_NODE(ctx, queue_list, OID_AUTO,
@@ -169,4 +187,33 @@ void
 mana_sysctl_free_queues(struct mana_port_context *apc)
 {
 	sysctl_ctx_free(&apc->que_sysctl_ctx);
+}
+
+static int
+mana_sysctl_cleanup_thread_cpu(SYSCTL_HANDLER_ARGS)
+{
+	struct mana_port_context *apc = arg1;
+	bool bind_cpu = false;
+	uint8_t val;
+	int err;
+
+	val = 0;
+	err = sysctl_wire_old_buffer(req, sizeof(val));
+	if (err == 0) {
+		val = apc->bind_cleanup_thread_cpu;
+		err = sysctl_handle_8(oidp, &val, 0, req);
+	}
+
+	if (err != 0 || req->newptr == NULL)
+		return (err);
+
+	if (val != 0)
+		bind_cpu = true;
+
+	if (bind_cpu != apc->bind_cleanup_thread_cpu) {
+		apc->bind_cleanup_thread_cpu = bind_cpu;
+		err = mana_restart(apc);
+	}
+
+	return (err);
 }

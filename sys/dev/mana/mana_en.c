@@ -117,7 +117,7 @@ mana_ifmedia_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 	}
 
 	ifmr->ifm_status |= IFM_ACTIVE;
-	ifmr->ifm_active |= IFM_UNKNOWN | IFM_FDX;
+	ifmr->ifm_active |= IFM_100G_DR | IFM_FDX;
 
 	MANA_APC_LOCK_UNLOCK(apc);
 }
@@ -125,7 +125,25 @@ mana_ifmedia_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 static uint64_t
 mana_get_counter(struct ifnet *ifp, ift_counter cnt)
 {
-	return (if_get_counter_default(ifp, cnt));
+	struct mana_port_context *apc = if_getsoftc(ifp);
+	struct mana_port_stats *stats = &apc->port_stats;
+
+	switch (cnt) {
+	case IFCOUNTER_IPACKETS:
+		return (counter_u64_fetch(stats->rx_packets));
+	case IFCOUNTER_OPACKETS:
+		return (counter_u64_fetch(stats->tx_packets));
+	case IFCOUNTER_IBYTES:
+		return (counter_u64_fetch(stats->rx_bytes));
+	case IFCOUNTER_OBYTES:
+		return (counter_u64_fetch(stats->tx_bytes));
+	case IFCOUNTER_IQDROPS:
+		return (counter_u64_fetch(stats->rx_drops));
+	case IFCOUNTER_OQDROPS:
+		return (counter_u64_fetch(stats->tx_drops));
+	default:
+		return (if_get_counter_default(ifp, cnt));
+	}
 }
 
 static void
@@ -147,6 +165,21 @@ mana_qflush(struct ifnet *ifp)
 	if_qflush(ifp);
 }
 
+int
+mana_restart(struct mana_port_context *apc)
+{
+	int rc = 0;
+
+	MANA_APC_LOCK_LOCK(apc);
+	if (apc->port_is_up)
+		 mana_down(apc);
+
+	rc = mana_up(apc);
+	MANA_APC_LOCK_UNLOCK(apc);
+
+	return (rc);
+}
+
 static int
 mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 {
@@ -155,11 +188,33 @@ mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 	struct ifreq *ifr;
 	struct ifrsskey *ifrk;
 	struct ifrsshash *ifrh;
+	uint16_t new_mtu;
 	int rc = 0;
 
 #if 1
 	switch (command) {
 	case SIOCSIFMTU:
+		ifr = (struct ifreq *)data;
+		new_mtu = ifr->ifr_mtu;
+		if (ifp->if_mtu == new_mtu)
+			break;
+		if ((new_mtu + 18 > MAX_FRAME_SIZE) ||
+		    (new_mtu + 18 < MIN_FRAME_SIZE)) {
+			if_printf(ifp, "Invalid MTU. new_mtu: %d, "
+			    "max allowed: %d, min allowed: %d\n",
+			    new_mtu, MAX_FRAME_SIZE - 18, MIN_FRAME_SIZE - 18);
+			return EINVAL;
+		}
+		MANA_APC_LOCK_LOCK(apc);
+		if (apc->port_is_up)
+			mana_down(apc);
+
+		apc->frame_size = new_mtu + 18;
+		if_setmtu(ifp, new_mtu);
+		mana_trc_dbg(NULL, "Set MTU to %d\n", new_mtu);
+
+		rc = mana_up(apc);
+		MANA_APC_LOCK_UNLOCK(apc);
 		break;
 
 	case SIOCSIFFLAGS:
@@ -167,7 +222,7 @@ mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 			if ((ifp->if_drv_flags & IFF_DRV_RUNNING) == 0) {
 				MANA_APC_LOCK_LOCK(apc);
 				if (!apc->port_is_up)
-					mana_up(apc);
+					rc = mana_up(apc);
 				MANA_APC_LOCK_UNLOCK(apc);
 			}
 		} else {
@@ -449,6 +504,16 @@ mana_xmit(struct mana_txq *txq)
 			/* SQ is full. Set the IFF_DRV_OACTIVE flag */
 			if_setdrvflagbits(apc->ndev, IFF_DRV_OACTIVE, 0);
 			counter_u64_add(tx_stats->stop, 1);
+			uint64_t stops = counter_u64_fetch(tx_stats->stop);
+			uint64_t wakeups = counter_u64_fetch(tx_stats->wakeup);
+#define MANA_TXQ_STOP_THRESHOLD		50
+			if (stops > MANA_TXQ_STOP_THRESHOLD && wakeups > 0 &&
+			    stops > wakeups && txq->alt_txq_idx == txq->idx) {
+				txq->alt_txq_idx =
+				    (txq->idx + (stops / wakeups))
+				    % apc->num_queues;
+				counter_u64_add(tx_stats->alt_chg, 1);
+			}
 
 			drbr_putback(ndev, txq->txq_br, mbuf);
 
@@ -864,6 +929,10 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 		    txq_id, m->m_pkthdr.flowid);
 #endif
 	}
+#if 1
+	if (apc->enable_tx_altq)
+		txq_id = apc->tx_qp[txq_id].txq.alt_txq_idx;
+#endif
 
 	txq = &apc->tx_qp[txq_id].txq;
 
@@ -1559,6 +1628,15 @@ mana_poll_tx_cq(struct mana_cq *cq)
 			if_setdrvflagbits(apc->ndev, IFF_DRV_RUNNING,
 			    IFF_DRV_OACTIVE);
 			counter_u64_add(txq->stats.wakeup, 1);
+			if (txq->alt_txq_idx != txq->idx) {
+				uint64_t stops = counter_u64_fetch(txq->stats.stop);
+				uint64_t wakeups = counter_u64_fetch(txq->stats.wakeup);
+				/* Reset alt_txq_idx back if it is not overloaded */
+				if (stops < wakeups) {
+					txq->alt_txq_idx = txq->idx;
+					counter_u64_add(txq->stats.alt_reset, 1);
+				}
+			}
 			rmb();
 			/* Schedule a tx enqueue task */
 			taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
@@ -2013,6 +2091,7 @@ mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
 		txq->vp_offset = apc->tx_vp_offset;
 		// skb_queue_head_init(&txq->pending_skbs);
 		txq->idx = i;
+		txq->alt_txq_idx = i;
 
 		memset(&spec, 0, sizeof(spec));
 		spec.type = GDMA_SQ;
@@ -2277,9 +2356,9 @@ mana_create_rxq(struct mana_port_context *apc, uint32_t rxq_idx,
 	 * Now we just allow maxium size of 4096.
 	 */
 	// XXX rxq->datasize = ALIGN(MAX_FRAME_SIZE, 64);
-	rxq->datasize = ALIGN(MAX_FRAME_SIZE, MCLBYTES);
-	if (rxq->datasize > 4096)
-		rxq->datasize = 4096;
+	rxq->datasize = ALIGN(apc->frame_size, MCLBYTES);
+	if (rxq->datasize > MAX_FRAME_SIZE)
+		rxq->datasize = MAX_FRAME_SIZE;
 
 	mana_trc_dbg(NULL, "Setting rxq %d datasize %d\n",
 	    rxq_idx, rxq->datasize);
@@ -2748,6 +2827,7 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 	    gc->max_num_queues, MANA_MAX_NUM_QUEUES);
 	apc->port_handle = INVALID_MANA_HANDLE;
 	apc->port_idx = port_idx;
+	apc->frame_size = DEFAULT_FRAME_SIZE;
 
 	MANA_APC_LOCK_INIT(apc);
 
@@ -2764,7 +2844,7 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 	if_setgetcounterfn(ndev, mana_get_counter);
 
 	if_setmtu(ndev, ETHERMTU);
-	if_setbaudrate(ndev, 0);
+	if_setbaudrate(ndev, IF_Gbps(100));
 
 	// netif_carrier_off(ndev);
 
@@ -2787,7 +2867,7 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 	ndev->if_capabilities |= IFCAP_RXCSUM | IFCAP_RXCSUM_IPV6;
 	ndev->if_capabilities |= IFCAP_TSO4 | IFCAP_TSO6;
 
-	ndev->if_capabilities |= IFCAP_LRO;
+	ndev->if_capabilities |= IFCAP_LRO | IFCAP_LINKSTATE;
 
 	// ndev->if_capabilities |= IFCAP_JUMBO_MTU;
 

@@ -103,8 +103,10 @@ enum TRI_STATE {
 
 #define COMP_ENTRY_SIZE			64
 
+#define MIN_FRAME_SIZE			146
 #define ADAPTER_MTU_SIZE		1500
-#define MAX_FRAME_SIZE			(ADAPTER_MTU_SIZE + 14)
+#define DEFAULT_FRAME_SIZE		(ADAPTER_MTU_SIZE + 14)
+#define MAX_FRAME_SIZE			4096
 
 #define RX_BUFFERS_PER_QUEUE		512
 
@@ -139,6 +141,8 @@ struct mana_stats {
 	counter_u64_t			collapse_err;		/* tx */
 	counter_u64_t			dma_mapping_err;	/* rx, tx */
 	counter_u64_t			mbuf_alloc_fail;	/* rx */
+	counter_u64_t			alt_chg;		/* tx */
+	counter_u64_t			alt_reset;		/* tx */
 };
 
 struct mana_txq {
@@ -158,6 +162,8 @@ struct mana_txq {
 	struct ifnet		*ndev;
 	/* Store index to the array of tx_qp in port structure */
 	int			idx;
+	/* The alternative txq idx when this txq is under heavy load */
+	int			alt_txq_idx;
 
 #if 0 /* XXX */
 	/* The SKBs are sent to the HW and we are waiting for the CQEs. */
@@ -499,8 +505,13 @@ struct mana_port_context {
 
 	uint16_t		port_idx;
 
+	uint16_t		frame_size;
+
 	bool			port_is_up;
 	bool			port_st_save; /* Saved port state */
+
+	bool			enable_tx_altq;
+	bool			bind_cleanup_thread_cpu;
 
 	struct mana_port_stats	port_stats;
 
@@ -684,5 +695,7 @@ struct mana_tx_package {
 
 	struct gdma_posted_wqe_info	wqe_info;
 };
+
+int mana_restart(struct mana_port_context *apc);
 
 #endif /* _MANA_H */
