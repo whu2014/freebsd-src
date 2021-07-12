@@ -165,12 +165,6 @@ struct mana_txq {
 	/* The alternative txq idx when this txq is under heavy load */
 	int			alt_txq_idx;
 
-#if 0 /* XXX */
-	/* The SKBs are sent to the HW and we are waiting for the CQEs. */
-	struct sk_buff_head pending_skbs;
-	struct netdev_queue *net_txq;
-
-#endif
 	/* The mbufs are sent to the HW and we are waiting for the CQEs. */
 	struct mana_send_buf_info	*tx_buf_info;
 	uint16_t		next_to_use;
@@ -534,10 +528,6 @@ int mana_detach(struct ifnet *ndev);
 
 int mana_probe(struct gdma_dev *gd);
 void mana_remove(struct gdma_dev *gd);
-
-#if 0 /* XXX */
-extern const struct ethtool_ops mana_ethtool_ops;
-#endif
 
 struct mana_obj_spec {
 	uint32_t	queue_index;

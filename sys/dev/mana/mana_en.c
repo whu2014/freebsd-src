@@ -1,4 +1,3 @@
-
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
@@ -48,11 +47,8 @@ __FBSDID("$FreeBSD$");
 #include <machine/resource.h>
 #include <machine/in_cksum.h>
 
-#include <net/bpf.h>
 #include <net/if.h>
 #include <net/if_var.h>
-#include <net/if_arp.h>
-#include <net/if_dl.h>
 #include <net/if_types.h>
 #include <net/if_vlan_var.h>
 #ifdef RSS
@@ -184,14 +180,12 @@ static int
 mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 {
 	struct mana_port_context *apc = if_getsoftc(ifp);
-	// struct ifreq *ifr = (struct ifreq *)data;
-	struct ifreq *ifr;
 	struct ifrsskey *ifrk;
 	struct ifrsshash *ifrh;
+	struct ifreq *ifr;
 	uint16_t new_mtu;
 	int rc = 0;
 
-#if 1
 	switch (command) {
 	case SIOCSIFMTU:
 		ifr = (struct ifreq *)data;
@@ -263,7 +257,6 @@ mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 		rc = ether_ioctl(ifp, command, data);
 		break;
 	}
-#endif
 
 	return (rc);
 }
@@ -326,7 +319,7 @@ mana_tx_map_mbuf(struct mana_port_context *apc,
 			*m_head = m = m_new;
 		}
 
-		mana_trc_dbg(NULL,
+		mana_trc_warn(NULL,
 		    "Too many segs in orig mbuf, m_collapse called\n");
 
 		err = bus_dmamap_load_mbuf_sg(apc->tx_buf_tag,
@@ -371,13 +364,6 @@ mana_load_rx_mbuf(struct mana_port_context *apc, struct mana_rxq *rxq,
 	int nsegs, err;
 	uint32_t mlen;
 
-
-#if 0 /*XXX do not check. Could be trying to refill */
-	/* If previously allocated mbuf exists */
-	if (unlikely(rx_oob->mbuf))
-		return 0;
-#endif
-
 	if (alloc_mbuf) {
 		mbuf = m_getjcl(M_NOWAIT, MT_DATA, M_PKTHDR, rxq->datasize);
 		if (unlikely(mbuf == NULL)) {
@@ -404,7 +390,7 @@ mana_load_rx_mbuf(struct mana_port_context *apc, struct mana_rxq *rxq,
 	    mbuf, segs, &nsegs, BUS_DMA_NOWAIT);
 
 	if (unlikely((err != 0) || (nsegs != 1))) {
-		mana_trc_dbg(NULL, "Failed to map mbuf, error: %d, "
+		mana_trc_warn(NULL, "Failed to map mbuf, error: %d, "
 		    "nsegs: %d\n", err, nsegs);
 		counter_u64_add(rxq->stats.dma_mapping_err, 1);
 		goto error;
@@ -476,31 +462,13 @@ mana_xmit(struct mana_txq *txq)
 	next_to_use = txq->next_to_use;
 
 	while ((mbuf = drbr_peek(ndev, txq->txq_br)) != NULL) {
-		//atomic_inc_return(&txq->pending_sends);
-
-		/* Ensure pending_sends update before reading port status */
-		//rmb();
-
 		if (!apc->port_is_up ||
 		    (if_getdrvflags(ndev) & MANA_TXQ_FULL) != IFF_DRV_RUNNING) {
 			drbr_putback(ndev, txq->txq_br, mbuf);
-			// atomic_dec_return(&txq->pending_sends);
 			break;
 		}
 
-		// mana_trc_dbg(NULL, "check 10\n");
-
 		if (!mana_can_tx(gdma_sq)) {
-#if 0 /* Must match txqfull_handling */
-			// drbr_putback(ndev, txq->txq_br, mbuf);
-
-			mana_trc_dbg(NULL, "no enough spc on txq %d, %d\n",
-			    txq->idx, mana_gd_wq_avail_space(gdma_sq));
-			// atomic_dec_return(&txq->pending_sends);
-			/* SQ is full. Schedule a task to come back later */
-			// taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
-			break;
-#else
 			/* SQ is full. Set the IFF_DRV_OACTIVE flag */
 			if_setdrvflagbits(apc->ndev, IFF_DRV_OACTIVE, 0);
 			counter_u64_add(tx_stats->stop, 1);
@@ -520,31 +488,8 @@ mana_xmit(struct mana_txq *txq)
 			taskqueue_enqueue(gdma_eq->eq.cleanup_tq,
 			    &gdma_eq->eq.cleanup_task);
 			break;
-#if 0
-			mb();
-			/* Re_check and wake up if needed */
-			if (mana_can_tx(gdma_sq)) {
-				if_setdrvflagbits(apc->ndev, 0,
-				    IFF_DRV_OACTIVE);
-			} else {
-				mana_trc_dbg(NULL,
-				    "no enough spc on txq %d, %d\n",
-				    txq->idx, mana_gd_wq_avail_space(gdma_sq));
-
-				drbr_putback(ndev, txq->txq_br, mbuf);
-				mb();
-				/* Scehculde a cleanup task for wakeup */
-				taskqueue_enqueue(gdma_eq->eq.cleanup_tq,
-				    &gdma_eq->eq.cleanup_task);
-				break;
-			}
-#endif
-#endif
 		}
 
-		// mana_trc_dbg(NULL, "check 20\n");
-
-		// next_to_use = txq->next_to_use;
 		tx_info = &txq->tx_buf_info[next_to_use];
 
 		memset(&pkg, 0, sizeof(struct mana_tx_package));
@@ -561,15 +506,8 @@ mana_xmit(struct mana_txq *txq)
 			m_freem(mbuf);
 			/* Advance the drbr queue */
 			drbr_advance(ndev, txq->txq_br);
-			// atomic_dec_return(&txq->pending_sends);
 			continue;
 		}
-
-#if 0
-		mana_trc_dbg(NULL, "check 30, orig mbuf = %p, "
-		    "mbuf = %p, nsegs = %d\n",
-		    mbuf, tx_info->mbuf, pkg.wqe_req.num_sge);
-#endif
 
 		pkg.tx_oob.s_oob.vcq_num = cq->gdma_id;
 		pkg.tx_oob.s_oob.vsq_frame = txq->vsq_frame;
@@ -609,13 +547,6 @@ mana_xmit(struct mana_txq *txq)
 			if (MANA_L3_PROTO(mbuf) == ETHERTYPE_IP) {
 				pkg.tx_oob.s_oob.is_outer_ipv4 = 1;
 				pkg.tx_oob.s_oob.comp_iphdr_csum = 1;
-#if 0
-				mana_trc_dbg(NULL,
-				    "check 35, mbuf ipv4, l4 = %d, "
-				    "tansport start = %d\n",
-				    MANA_L4_PROTO(mbuf),
-				    mbuf->m_pkthdr.l3hlen);
-#endif
 			} else {
 				pkg.tx_oob.s_oob.is_outer_ipv6 = 1;
 			}
@@ -639,12 +570,6 @@ mana_xmit(struct mana_txq *txq)
 
 		len = mbuf->m_pkthdr.len;
 
-#if 0
-		mana_trc_dbg(NULL,
-		    "check 40, mbuf len = %d, csum_flags = 0x%x\n",
-		    len, mbuf->m_pkthdr.csum_flags);
-#endif
-
 		err = mana_gd_post_work_request(gdma_sq, &pkg.wqe_req,
 		    (struct gdma_posted_wqe_info *)&tx_info->wqe_inf);
 		if (unlikely(err)) {
@@ -654,7 +579,6 @@ mana_xmit(struct mana_txq *txq)
 			mana_tx_unmap_mbuf(apc, tx_info);
 
 			drbr_advance(ndev, txq->txq_br);
-			//atomic_dec_return(&txq->pending_sends);
 			continue;
 		}
 
@@ -664,13 +588,6 @@ mana_xmit(struct mana_txq *txq)
 		    (next_to_use + 1) % MAX_SEND_BUFFERS_PER_QUEUE;
 
 		atomic_inc_return(&txq->pending_sends);
-#if 0
-		if (next_to_use == 0)
-		    mana_trc_dbg(NULL,
-		        "txq %i next_to_use about to wrapped around, "
-			"ntu = %d, ntc = %d\n",
-			txq->idx, next_to_use, txq->next_to_complete);
-#endif
 
 		drbr_advance(ndev, txq->txq_br);
 
@@ -688,10 +605,6 @@ mana_xmit(struct mana_txq *txq)
 	counter_exit();
 
 	txq->next_to_use = next_to_use;
-#if 0
-	mana_trc_dbg(NULL, "check 50, pending_sends = %d\n",
-	    txq->pending_sends);
-#endif
 }
 
 static void
@@ -736,8 +649,6 @@ mana_tso_fixup(struct mbuf *mbuf)
 		etype = ntohs(eh->evl_encap_proto);
 		ehlen = ETHER_HDR_LEN;
 	}
-	// mbuf->m_pkthdr.l2hlen = ehlen;
-
 
 	if (etype == ETHERTYPE_IP) {
 		struct ip *ip;
@@ -755,13 +666,6 @@ mana_tso_fixup(struct mbuf *mbuf)
 		ip->ip_sum = 0;
 		th->th_sum = in_pseudo(ip->ip_src.s_addr,
 		    ip->ip_dst.s_addr, htons(IPPROTO_TCP));
-#if 0
-		mana_trc_dbg(NULL,
-		    "TSO ip_s 0x%x, ip_d 0x%x, TCP porot 0x%x, tcp csum 0x%x, "
-		    "mss = %d\n",
-		    ip->ip_src.s_addr, ip->ip_dst.s_addr, htons(IPPROTO_TCP),
-		    th->th_sum, mbuf->m_pkthdr.tso_segsz);
-#endif
 	} else if (etype == ETHERTYPE_IPV6) {
 		struct ip6_hdr *ip6;
 
@@ -781,17 +685,12 @@ mana_tso_fixup(struct mbuf *mbuf)
 		th->th_sum = in6_cksum_pseudo(ip6, 0, IPPROTO_TCP, 0);
 	} else {
 		/* CSUM_TSO is set but not IP protocol. */
-		mana_trc_dbg(NULL, "TSO mbuf not right, freed.\n");
+		mana_trc_warn(NULL, "TSO mbuf not right, freed.\n");
 		m_freem(mbuf);
 		return NULL;
 	}
 
 	MANA_L3_PROTO(mbuf) = etype;
-#if 0
-	mana_trc_dbg(NULL, "TSO packet, m_head_s = %d, m_len = %d, "
-	    "l4_offset = %d\n", mbuf->m_pkthdr.len, mbuf->m_len,
-	    mbuf->m_pkthdr.l3hlen);
-#endif
 
 	return (mbuf);
 }
@@ -815,7 +714,6 @@ mana_mbuf_csum_check(struct mbuf *mbuf)
 		etype = ntohs(eh->evl_encap_proto);
 		ehlen = ETHER_HDR_LEN;
 	}
-	//mbuf->m_pkthdr.l2hlen = ehlen;
 
 	mbuf_next = m_getptr(mbuf, ehlen, &offset);
 
@@ -828,45 +726,20 @@ mana_mbuf_csum_check(struct mbuf *mbuf)
 		iphlen = ip->ip_hl << 2;
 		mbuf->m_pkthdr.l3hlen = ehlen + iphlen;
 
-		/*
-		 * Only set the L4 proto when the csum_flag and
-		 * proto match.
-		 */
-#if 0
-		if (((mbuf->m_pkthdr.csum_flags & CSUM_IP_TCP) &&
-		    ip->ip_p == IPPROTO_TCP) ||
-		    ((mbuf->m_pkthdr.csum_flags & CSUM_IP_UDP) &&
-		    ip->ip_p == IPPROTO_UDP))
-#endif
-			MANA_L4_PROTO(mbuf) = ip->ip_p;
+		MANA_L4_PROTO(mbuf) = ip->ip_p;
 	} else if (etype == ETHERTYPE_IPV6) {
 		const struct ip6_hdr *ip6;
 
 		ip6 = (struct ip6_hdr *)(mtodo(mbuf_next, offset));
 		mbuf->m_pkthdr.l3hlen = ehlen + sizeof(*ip6);
 
-		/*
-		 * Only set the L4 proto when the csum_flag and
-		 * proto match.
-		 */
-#if 0
-		if (((mbuf->m_pkthdr.csum_flags & CSUM_IP6_TCP) &&
-		    ip6->ip6_nxt == IPPROTO_TCP) ||
-		    ((mbuf->m_pkthdr.csum_flags & CSUM_IP6_UDP) &&
-		    ip6->ip6_nxt == IPPROTO_UDP))
-#endif
-			MANA_L4_PROTO(mbuf) = ip6->ip6_nxt;
+		MANA_L4_PROTO(mbuf) = ip6->ip6_nxt;
 	} else {
-		/* XXX Should we free the mbuf and return? */
-		//m_freem(mbuf);
-		//return NULL;
-		// mana_trc_dbg(NULL, "Packet not IP type.\n");
 		MANA_L4_PROTO(mbuf) = 0;
-		// goto out;
 	}
 
 	MANA_L3_PROTO(mbuf) = etype;
-//out:
+
 	return (mbuf);
 }
 
@@ -891,12 +764,7 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 			counter_exit();
 			return EIO;
 		}
-#if 0
-	} else if (m->m_pkthdr.csum_flags &
-	    (CSUM_IP_UDP | CSUM_IP_TCP | CSUM_IP6_UDP | CSUM_IP6_TCP)) {
-#else
 	} else {
-#endif
 		m = mana_mbuf_csum_check(m);
 		if (unlikely(m == NULL)) {
 			counter_enter();
@@ -905,82 +773,34 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 			return EIO;
 		}
 	}
-	// mana_trc_dbg(NULL, "txq check 30\n");
 
 	if (M_HASHTYPE_GET(m) != M_HASHTYPE_NONE) {
-#if 0
-		txq_id = curcpu % apc->num_queues;
-#else
-		// uint8_t *hash_byte = (uint8_t *) &m->m_pkthdr.flowid;
 		uint32_t hash = m->m_pkthdr.flowid;
-		 //mana_trc_dbg(NULL, "txq check 33, hash = 0x%x\n", hash);
 		txq_id = apc->indir_table[(hash) & MANA_INDIRECT_TABLE_MASK] %
 		    apc->num_queues;
-#endif
-#if 0
-		mana_trc_dbg(NULL, "$$$$$ chose txq %u for hash: 0x%x\n",
-		    txq_id, hash);
-#endif
-
 	} else {
 		txq_id = m->m_pkthdr.flowid % apc->num_queues;
-#if 0
-		mana_trc_dbg(NULL, "----- chose txq %u for flowid: 0x%x\n",
-		    txq_id, m->m_pkthdr.flowid);
-#endif
 	}
-#if 1
+
 	if (apc->enable_tx_altq)
 		txq_id = apc->tx_qp[txq_id].txq.alt_txq_idx;
-#endif
 
 	txq = &apc->tx_qp[txq_id].txq;
-
-#if 0
-	mana_trc_dbg(NULL, "txq check 40, choose txq_id = %d, mbuf = %p, "
-	    "head len = %d, mlen = %d, "
-	    "l3 proto = 0x%x, l3-start = %u, l4 proto = 0x%x, l4-len = %d\n",
-	    txq_id, m, m->m_pkthdr.len, m->m_len,
-	    MANA_L3_PROTO(m), m->m_pkthdr.l2hlen,
-	    MANA_L4_PROTO(m), m->m_pkthdr.l3hlen);
-#endif
 
 	is_drbr_empty = drbr_empty(ifp, txq->txq_br);
 	err = drbr_enqueue(ifp, txq->txq_br, m);
 	if (unlikely(err)) {
-		mana_trc_dbg(NULL, "txq %u failed to enqueue: %d\n",
+		mana_trc_warn(NULL, "txq %u failed to enqueue: %d\n",
 		    txq_id, err);
 		taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
 		return err;
 	}
 
 	if (is_drbr_empty && mtx_trylock(&txq->txq_mtx)) {
-		// mana_trc_dbg(NULL, "txq check 50, before calling mana_xmit\n");
 		mana_xmit(txq);
-		// mana_trc_dbg(NULL, "txq check 60, after calling mana_xmit\n");
 		mtx_unlock(&txq->txq_mtx);
 	} else {
-#if 0
-		mana_trc_dbg(NULL,
-		    "dbdr not empty on txq %u, "
-		    "send task scheduled\n", txq_id);
-#endif
-#if 0
-		if ((if_getdrvflags(ifp) & MANA_TXQ_FULL) == MANA_TXQ_FULL) {
-			struct gdma_queue *gdma_wq = txq->gdma_sq;
-			uint32_t avail_space = mana_gd_wq_avail_space(gdma_wq);
-			if (apc->port_is_up &&
-			    avail_space >= MAX_TX_WQE_SIZE) {
-				/* Clear the Q full flag */
-				if_setdrvflagbits(ifp, 0, IFF_DRV_OACTIVE);
-				/* Schedule a tx enqueue task */
-				taskqueue_enqueue(txq->enqueue_tq,
-				    &txq->enqueue_task);
-			}
-		}
-#endif
 		taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
-		// mana_trc_dbg(NULL, "txq check 70, after calling taskqueue_enqueue\n");
 	}
 
 	return 0;
@@ -1475,12 +1295,9 @@ mana_poll_tx_cq(struct mana_cq *cq)
 	int i;
 	int sa_drop = 0;
 
-#if 1 /* txqfull_handling */
 	struct gdma_queue *gdma_wq;
 	unsigned int avail_space;
 	bool txq_full = false;
-#endif
-	// mana_trc_dbg(NULL, "tx complete check 10\n");
 
 	ndev = txq->ndev;
 	apc = if_getsoftc(ndev);
@@ -1489,14 +1306,6 @@ mana_poll_tx_cq(struct mana_cq *cq)
 	    CQE_POLLING_BUFFER);
 
 	next_to_complete = txq->next_to_complete;
-
-#if 0
-	if (comp_read > 15)
-	// if (comp_read)
-		mana_trc_dbg(NULL,
-		    "txq %d complete check 20, comp_read = %d\n",
-		    txq_idx, comp_read);
-#endif
 
 	for (i = 0; i < comp_read; i++) {
 		struct mana_tx_comp_oob *cqe_oob;
@@ -1537,7 +1346,7 @@ mana_poll_tx_cq(struct mana_cq *cq)
 			break;
 
 		default:
-			/* If the CQE type is unexpected, log an error, assert,
+			/* If the CQE type is unexpected, log an error,
 			 * and go through the error path.
 			 */
 			mana_trc_err(NULL,
@@ -1552,10 +1361,8 @@ mana_poll_tx_cq(struct mana_cq *cq)
 			    "%d != %d\n",
 			    txq->gdma_txq_id, completions[i].wq_num);
 			break;
-			//return;
 		}
 
-		// next_to_complete = txq->next_to_complete;
 		tx_info = &txq->tx_buf_info[next_to_complete];
 		if (!tx_info->mbuf) {
 			mana_trc_err(NULL,
@@ -1571,8 +1378,6 @@ mana_poll_tx_cq(struct mana_cq *cq)
 		wqe_info = &tx_info->wqe_inf;
 		wqe_unit_cnt += wqe_info->wqe_size_in_bu;
 
-		// mana_trc_dbg(NULL, "tx completing mbuf = %p\n", tx_info->mbuf);
-
 		mana_tx_unmap_mbuf(apc, tx_info);
 		mb();
 
@@ -1584,18 +1389,9 @@ mana_poll_tx_cq(struct mana_cq *cq)
 
 	txq->next_to_complete = next_to_complete;
 
-#if 0
-	if (pkt_transmitted > 10)
-		mana_trc_dbg(NULL, "txq %d, next to complete = %d, "
-		"transmitted = %d, wqe unit = %d\n",
-		txq->idx, txq->next_to_complete, pkt_transmitted,
-		wqe_unit_cnt);
-#endif
-
 	if (wqe_unit_cnt == 0) {
 		mana_trc_err(NULL,
 		    "WARNING: TX ring not proceeding!\n");
-
 		return;
 	}
 
@@ -1604,8 +1400,6 @@ mana_poll_tx_cq(struct mana_cq *cq)
 	/* Ensure tail updated before checking q stop */
 	wmb();
 
-#if 0 /* Must match with txqfull_handling */
-#else
 	gdma_wq = txq->gdma_sq;
 	avail_space = mana_gd_wq_avail_space(gdma_wq);
 
@@ -1640,21 +1434,14 @@ mana_poll_tx_cq(struct mana_cq *cq)
 			rmb();
 			/* Schedule a tx enqueue task */
 			taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
-			// apc->eth_stats.wake_queue++;
 		}
 		mtx_unlock(&txq->txq_mtx);
 	}
-#endif
 
 	if (atomic_sub_return(pkt_transmitted, &txq->pending_sends) < 0)
 		mana_trc_err(NULL,
 		    "WARNING: TX %d pending_sends error: %d\n",
 		    txq->idx, txq->pending_sends);
-
-#if 0
-	mana_trc_dbg(NULL,
-	    "tx complete check 80, pending_sends = %d\n", txq->pending_sends);
-#endif
 }
 
 static void
@@ -1702,7 +1489,6 @@ mana_rx_mbuf(struct mbuf *mbuf, struct mana_rxcomp_oob *cqe,
 	eq->eq.work_done++;
 
 	if (!mbuf) {
-		// XXX ++ndev->stats.rx_dropped;
 		return;
 	}
 
@@ -1710,14 +1496,6 @@ mana_rx_mbuf(struct mbuf *mbuf, struct mana_rxcomp_oob *cqe,
 	mbuf->m_pkthdr.len = pkt_len;
 	mbuf->m_len = pkt_len;
 	mbuf->m_pkthdr.rcvif = ndev;
-
-#if 0
-	mana_trc_dbg(NULL, "rxq check 10, mbuf_len %d, hashtype = 0x%x "
-	    "out-ip-csum-s: %u, ip-csum-s: %u, tcp-csum-s: %u, udp_csum-s: %u\n",
-	    pkt_len, cqe->rx_hashtype, cqe->rx_outer_iphdr_csum_succeed,
-	    cqe->rx_iphdr_csum_succeed, cqe->rx_tcp_csum_succeed,
-	    cqe->rx_udp_csum_succeed);
-#endif
 
 	if ((ndev->if_capenable & IFCAP_RXCSUM ||
 	    ndev->if_capenable & IFCAP_RXCSUM_IPV6) &&
@@ -1778,27 +1556,13 @@ mana_rx_mbuf(struct mbuf *mbuf, struct mana_rxcomp_oob *cqe,
 		M_HASHTYPE_SET(mbuf, M_HASHTYPE_NONE);
 	}
 
-	// mana_trc_dbg(NULL, "rxq check 20\n");
-
 	do_if_input = true;
 	if ((ndev->if_capenable & IFCAP_LRO) && do_lro) {
-		// mana_trc_dbg(NULL, "rxq check 22\n");
-
-#if 0
-		if (rxq->lro.lro_cnt != 0) {
-			int error = tcp_lro_rx(&rxq->lro, mbuf, 0);
-			if (error)
-				mana_trc_dbg(NULL,
-				    "rxq check 25, lro error = %d\n", error);
-		}
-#else
 		if (rxq->lro.lro_cnt != 0 &&
 		    tcp_lro_rx(&rxq->lro, mbuf, 0) == 0)
 			do_if_input = false;
-#endif
 	}
 	if (do_if_input) {
-		// mana_trc_dbg(NULL, "rxq check 30\n");
 		ndev->if_input(ndev, mbuf);
 	}
 
@@ -1875,7 +1639,7 @@ mana_process_rx_cqe(struct mana_rxq *rxq, struct mana_cq *cq,
 	err = mana_load_rx_mbuf(apc, rxq, rxbuf_oob, true);
 	if (err) {
 		mana_trc_dbg(NULL,
-		    "**** failed to load rx mbuf, err = %d, packet dropped.\n",
+		    "failed to load rx mbuf, err = %d, packet dropped.\n",
 		    err);
 		counter_u64_add(rxq->stats.mbuf_alloc_fail, 1);
 		/*
@@ -1887,10 +1651,6 @@ mana_process_rx_cqe(struct mana_rxq *rxq, struct mana_cq *cq,
 		 mana_load_rx_mbuf(apc, rxq, rxbuf_oob, false);
 	}
 
-#if 0
-	mana_trc_dbg(NULL, "Before calling mana_rx_mbuf, curr = %d, "
-	    "old mbuf %p, new mbuf %p\n", curr, old_mbuf, rxbuf_oob->mbuf);
-#endif
 	mana_rx_mbuf(old_mbuf, oob, rxq);
 
 	mana_move_wq_tail(rxq->gdma_rq, rxbuf_oob->wqe_inf.wqe_size_in_bu);
@@ -1939,12 +1699,9 @@ mana_cq_handler(void *context, struct gdma_queue *gdma_queue)
 	KASSERT(cq->gdma_cq == gdma_queue,
 	    ("cq do not match %p, %p", cq->gdma_cq, gdma_queue));
 
-	// mana_trc_dbg(NULL, "check 10\n");
 	if (cq->type == MANA_CQ_TYPE_RX) {
-		// mana_trc_dbg(NULL, "check 20, calling RX complete\n");
 		mana_poll_rx_cq(cq);
 	} else {
-		// mana_trc_dbg(NULL, "check 30, calling TX complete\n");
 		mana_poll_tx_cq(cq);
 	}
 
@@ -1986,7 +1743,7 @@ mana_deinit_txq(struct mana_port_context *apc, struct mana_txq *txq)
 		    txq->next_to_use, txq->next_to_complete);
 	}
 
-	/*XXX Flush buf ring here? Grab txq mtx lock */
+	/* Flush buf ring. Grab txq mtx lock */
 	if (txq->txq_br) {
 		mtx_lock(&txq->txq_mtx);
 		drbr_flush(apc->ndev, txq->txq_br);
@@ -1994,7 +1751,7 @@ mana_deinit_txq(struct mana_port_context *apc, struct mana_txq *txq)
 		buf_ring_free(txq->txq_br, M_DEVBUF);
 	}
 
-	/*XXX drain taskqueue here? */
+	/* Drain taskqueue */
 	if (txq->enqueue_tq) {
 		while (taskqueue_cancel(txq->enqueue_tq,
 		    &txq->enqueue_task, NULL)) {
@@ -2085,11 +1842,8 @@ mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
 		/* Create SQ */
 		txq = &apc->tx_qp[i].txq;
 
-		// u64_stats_init(&txq->stats.syncp);
 		txq->ndev = net;
-		// txq->net_txq = netdev_get_tx_queue(net, i);
 		txq->vp_offset = apc->tx_vp_offset;
-		// skb_queue_head_init(&txq->pending_skbs);
 		txq->idx = i;
 		txq->alt_txq_idx = i;
 
@@ -2147,7 +1901,7 @@ mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
 		cq->gdma_id = cq->gdma_cq->id;
 
 		mana_trc_dbg(NULL,
-		    "***txq %d, txq gdma id %d, txq cq gdma id %d\n",
+		    "txq %d, txq gdma id %d, txq cq gdma id %d\n",
 		    i, txq->gdma_txq_id, cq->gdma_id);;
 
 		if (cq->gdma_id >= gc->max_num_cqs) {
@@ -2355,7 +2109,6 @@ mana_create_rxq(struct mana_port_context *apc, uint32_t rxq_idx,
 	 * Minimum size is MCLBYTES(2048) bytes for a mbuf cluster.
 	 * Now we just allow maxium size of 4096.
 	 */
-	// XXX rxq->datasize = ALIGN(MAX_FRAME_SIZE, 64);
 	rxq->datasize = ALIGN(apc->frame_size, MCLBYTES);
 	if (rxq->datasize > MAX_FRAME_SIZE)
 		rxq->datasize = MAX_FRAME_SIZE;
@@ -2436,10 +2189,6 @@ mana_create_rxq(struct mana_port_context *apc, uint32_t rxq_idx,
 	rxq->gdma_id = rxq->gdma_rq->id;
 	cq->gdma_id = cq->gdma_cq->id;
 
-	mana_trc_dbg(NULL,
-	    "$$$rxq gdma id %d, rxq cq gdma id %d\n",
-	    rxq->gdma_id, cq->gdma_id);;
-
 	err = mana_push_wqe(rxq);
 	if (err)
 		goto out;
@@ -2477,8 +2226,6 @@ mana_add_rx_queues(struct mana_port_context *apc, struct ifnet *ndev)
 			err = ENOMEM;
 			goto out;
 		}
-
-		// u64_stats_init(&rxq->stats.syncp);
 
 		apc->rxqs[i] = rxq;
 	}
@@ -2581,8 +2328,6 @@ mana_init_port(struct ifnet *ndev)
 	if (apc->num_queues > apc->max_queues)
 		apc->num_queues = apc->max_queues;
 
-	// ether_addr_copy(ndev->dev_addr, apc->mac_addr);
-
 	return 0;
 
 reset_apc:
@@ -2608,23 +2353,11 @@ mana_alloc_queues(struct ifnet *ndev)
 	if (err)
 		goto destroy_eq;
 
-#if 0
-	err = netif_set_real_num_tx_queues(ndev, apc->num_queues);
-	if (err)
-		goto destroy_vport;
-#endif
-
 	err = mana_add_rx_queues(apc, ndev);
 	if (err)
 		goto destroy_vport;
 
 	apc->rss_state = apc->num_queues > 1 ? TRI_STATE_TRUE : TRI_STATE_FALSE;
-
-#if 0
-	err = netif_set_real_num_rx_queues(ndev, apc->num_queues);
-	if (err)
-		goto destroy_vport;
-#endif
 
 	mana_rss_table_init(apc);
 
@@ -2644,7 +2377,6 @@ destroy_eq:
 static int
 mana_up(struct mana_port_context *apc)
 {
-#if 1
 	int err;
 
 	mana_trc_dbg(NULL, "mana_up called\n");
@@ -2654,7 +2386,6 @@ mana_up(struct mana_port_context *apc)
 		mana_trc_err(NULL, "Faile alloc mana queues: %d\n", err);
 		return err;
 	}
-#endif
 
 	/* Add queue specific sysctl */
 	mana_sysctl_add_queues(apc);
@@ -2664,10 +2395,8 @@ mana_up(struct mana_port_context *apc)
 	/* Ensure port state updated before txq state */
 	wmb();
 
-#if 1
 	if_link_state_change(apc->ndev, LINK_STATE_UP);
 	if_setdrvflagbits(apc->ndev, IFF_DRV_RUNNING, IFF_DRV_OACTIVE);
-#endif
 
 	return 0;
 }
@@ -2710,7 +2439,6 @@ mana_dealloc_queues(struct ifnet *ndev)
 		struct gdma_queue *eq = NULL;
 		if (tx_cq->gdma_cq)
 			eq = tx_cq->gdma_cq->cq.parent;
-		// eq = apc->eqs[i].eq;
 		if (eq) {
 			/* Stop EQ interrupt */
 			eq->eq.do_not_ring_db = true;
@@ -2831,7 +2559,6 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 
 	MANA_APC_LOCK_INIT(apc);
 
-	/* XXX name */
 	if_initname(ndev, device_get_name(gc->dev), port_idx);
 	if_setdev(ndev,gc->dev);
 	if_setsoftc(ndev, apc);
@@ -2846,30 +2573,17 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 	if_setmtu(ndev, ETHERMTU);
 	if_setbaudrate(ndev, IF_Gbps(100));
 
-	// netif_carrier_off(ndev);
-
 	mana_rss_key_fill(apc->hashkey, MANA_HASH_KEY_SIZE);
 
 	err = mana_init_port(ndev);
 	if (err)
 		goto reset_apc;
 
-#if 0
-	ndev->hw_features = NETIF_F_SG | NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM;
-	ndev->hw_features |= NETIF_F_RXCSUM;
-	ndev->hw_features |= NETIF_F_TSO | NETIF_F_TSO6;
-	ndev->hw_features |= NETIF_F_RXHASH;
-	ndev->features = ndev->hw_features;
-	ndev->vlan_features = 0;
-#endif
-
 	ndev->if_capabilities |= IFCAP_TXCSUM | IFCAP_TXCSUM_IPV6;
 	ndev->if_capabilities |= IFCAP_RXCSUM | IFCAP_RXCSUM_IPV6;
 	ndev->if_capabilities |= IFCAP_TSO4 | IFCAP_TSO6;
 
 	ndev->if_capabilities |= IFCAP_LRO | IFCAP_LINKSTATE;
-
-	// ndev->if_capabilities |= IFCAP_JUMBO_MTU;
 
 	/* Enable all available capabilities by default. */
 	ndev->if_capenable = ndev->if_capabilities;
@@ -2937,7 +2651,6 @@ int mana_probe(struct gdma_dev *gd)
 	if (ac->num_ports > MAX_PORTS_IN_MANA_DEV)
 		ac->num_ports = MAX_PORTS_IN_MANA_DEV;
 
-#if 1
 	for (i = 0; i < ac->num_ports; i++) {
 		err = mana_probe_port(ac, i, &ac->ports[i]);
 		if (err) {
@@ -2946,7 +2659,7 @@ int mana_probe(struct gdma_dev *gd)
 			break;
 		}
 	}
-#endif
+
 out:
 	if (err)
 		mana_remove(gd);

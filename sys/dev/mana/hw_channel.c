@@ -215,13 +215,6 @@ mana_hwc_init_event_handler(void *ctx, struct gdma_queue *q_self,
 		/* Ignore unknown events, which should never happen. */
 		break;
 	}
-
-#if 0 /*XXX */
-	mana_trc_dbg(NULL, "hwc got event type %u\n", event->type);
-	if (event->type == GDMA_EQE_HWC_INIT_DATA)
-		mana_trc_dbg(NULL, "hwc init event type %u, value %u\n",
-		    type, val);
-#endif
 }
 
 static void
@@ -239,7 +232,6 @@ mana_hwc_rx_event_handler(void *ctx, uint32_t gdma_rxq_id,
 	uint64_t rx_req_idx;
 	uint8_t *wqe;
 
-	// XXX if (WARN_ON_ONCE(hwc_rxq->gdma_wq->id != gdma_rxq_id))
 	if (hwc_rxq->gdma_wq->id != gdma_rxq_id) {
 		mana_trc_warn(NULL, "unmatched rx queue %u != %u\n",
 		    hwc_rxq->gdma_wq->id, gdma_rxq_id);
@@ -294,7 +286,6 @@ mana_hwc_tx_event_handler(void *ctx, uint32_t gdma_txq_id,
 	struct hw_channel_context *hwc = ctx;
 	struct hwc_wq *hwc_txq = hwc->txq;
 
-	// XXX WARN_ON_ONCE(!hwc_txq || hwc_txq->gdma_wq->id != gdma_txq_id);
 	if (!hwc_txq || hwc_txq->gdma_wq->id != gdma_txq_id) {
 		mana_trc_warn(NULL, "unmatched tx queue %u != %u\n",
 		    hwc_txq->gdma_wq->id, gdma_txq_id);
@@ -367,11 +358,8 @@ mana_hwc_comp_event(void *ctx, struct gdma_queue *q_self)
 	struct hwc_cq *hwc_cq = ctx;
 	int comp_read, i;
 
-	// XXX WARN_ON_ONCE(hwc_cq->gdma_cq != q_self);
-
 	completions = hwc_cq->comp_buf;
 	comp_read = mana_gd_poll_cq(q_self, completions, hwc_cq->queue_depth);
-	// XXX WARN_ON_ONCE(comp_read <= 0 || comp_read > hwc_cq->queue_depth);
 
 	for (i = 0; i < comp_read; ++i) {
 		comp_data = *(struct hwc_rx_oob *)completions[i].cqe_data;
@@ -386,7 +374,6 @@ mana_hwc_comp_event(void *ctx, struct gdma_queue *q_self)
 			    &comp_data);
 	}
 
-	/* XXX Really need this? */
 	bus_dmamap_sync(q_self->mem_info.dma_tag, q_self->mem_info.dma_map,
 	    BUS_DMASYNC_POSTREAD);
 
@@ -568,7 +555,7 @@ mana_hwc_create_wq(struct hw_channel_context *hwc,
 	int err;
 
 	if (q_type != GDMA_SQ && q_type != GDMA_RQ) {
-		// XXX should fail and return error?
+		/* XXX should fail and return error? */
 		mana_trc_warn(NULL, "Invalid q_type %u\n", q_type);
 	}
 
@@ -731,7 +718,6 @@ mana_hwc_establish_channel(struct gdma_context *gc, uint16_t *q_depth,
 	*max_req_msg_size = hwc->hwc_init_max_req_msg_size;
 	*max_resp_msg_size = hwc->hwc_init_max_resp_msg_size;
 
-	// XXX if (WARN_ON(cq->id >= gc->max_num_cqs))
 	if (cq->id >= gc->max_num_cqs) {
 		mana_trc_warn(NULL, "invalid cq id %u > %u\n",
 		    cq->id, gc->max_num_cqs);

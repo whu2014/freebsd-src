@@ -35,7 +35,7 @@ __FBSDID("$FreeBSD$");
 
 static int mana_sysctl_cleanup_thread_cpu(SYSCTL_HANDLER_ARGS);
 
-int mana_log_level = MANA_ALERT | MANA_WARNING | MANA_INFO | MANA_DBG;
+int mana_log_level = MANA_ALERT | MANA_WARNING | MANA_INFO;
 
 SYSCTL_NODE(_hw, OID_AUTO, mana, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
     "MANA driver parameters");
