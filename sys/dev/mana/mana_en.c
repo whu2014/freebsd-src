@@ -582,8 +582,6 @@ mana_xmit(struct mana_txq *txq)
 			continue;
 		}
 
-		// mb();
-
 		next_to_use =
 		    (next_to_use + 1) % MAX_SEND_BUFFERS_PER_QUEUE;
 
@@ -1615,8 +1613,13 @@ mana_process_rx_cqe(struct mana_rxq *rxq, struct mana_cq *cq,
 
 	if (pktlen == 0) {
 		/* data packets should never have packetlength of zero */
+#if defined(__amd64__)
 		if_printf(ndev, "RX pkt len=0, rq=%u, cq=%u, rxobj=0x%lx\n",
 		    rxq->gdma_id, cq->gdma_id, rxq->rxobj);
+#else
+		if_printf(ndev, "RX pkt len=0, rq=%u, cq=%u, rxobj=0x%llx\n",
+		    rxq->gdma_id, cq->gdma_id, rxq->rxobj);
+#endif
 		return;
 	}
 
@@ -1975,7 +1978,7 @@ mana_destroy_rxq(struct mana_port_context *apc, struct mana_rxq *rxq,
 		return;
 
 	if (validate_state) {
-		// XXX mana_napi_sync_for_rx(rxq); should we flush and stor Q here?
+		// should we flush and stor Q here?
 		// Cancel and drain cleanup task queue here.
 		;
 	}

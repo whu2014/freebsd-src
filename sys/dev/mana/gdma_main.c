@@ -75,6 +75,7 @@ mana_gd_r32(struct gdma_context *g, uint64_t offset)
 	return (v);
 }
 
+#if defined(__amd64__)
 static inline uint64_t
 mana_gd_r64(struct gdma_context *g, uint64_t offset)
 {
@@ -83,6 +84,19 @@ mana_gd_r64(struct gdma_context *g, uint64_t offset)
 	rmb();
 	return (v);
 }
+#else
+static inline uint64_t
+mana_gd_r64(struct gdma_context *g, uint64_t offset)
+{
+	uint64_t v;
+	uint32_t *vp = (uint32_t *)&v;
+
+	*vp =  mana_gd_r32(g, offset);
+	*(vp + 1) = mana_gd_r32(g, offset + 4);
+	rmb();
+	return (v);
+}
+#endif
 
 static int
 mana_gd_query_max_resources(device_t dev)
@@ -391,7 +405,13 @@ mana_gd_ring_doorbell(struct gdma_context *gc, uint32_t db_index,
 	/* Ensure all writes are done before ring doorbell */
 	wmb();
 
+#if defined(__amd64__)
 	writeq(addr, e.as_uint64);
+#else
+	uint32_t *p = (uint32_t *)&e.as_uint64;
+	writel(addr, *p);
+	writel((char *)addr + 4, *(p + 1));
+#endif
 }
 
 void
@@ -1541,10 +1561,12 @@ mana_gd_alloc_bar(device_t dev, int bar)
 
 	rid = PCIR_BAR(bar);
 	res = bus_alloc_resource_any(dev, type, &rid, RF_ACTIVE);
+#if defined(__amd64__)
 	if (res)
 		mana_trc_dbg(NULL, "bar %d: rid 0x%x, type 0x%jx,"
 		    " handle 0x%jx\n",
 		    bar, rid, res->r_bustag, res->r_bushandle);
+#endif
 
 alloc_bar_out:
 	return (res);
