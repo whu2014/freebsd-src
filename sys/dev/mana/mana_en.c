@@ -1352,8 +1352,7 @@ mana_poll_tx_cq(struct mana_cq *cq)
 			    cqe_oob->cqe_hdr.cqe_type);
 			return;
 		}
-		/* XXX: ~0x300 to work around buggy FPGA image sine 5/2021*/
-		if (txq->gdma_txq_id != (completions[i].wq_num & ~0x300)) {
+		if (txq->gdma_txq_id != completions[i].wq_num) {
 			mana_dbg(NULL,
 			    "txq gdma id not match completion wq num: "
 			    "%d != %d\n",
