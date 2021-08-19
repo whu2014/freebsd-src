@@ -58,13 +58,13 @@ extern int mana_log_level;
 	    fmt, __func__, curthread->td_tid, ##args)
 
 
-#define mana_trc_dbg(ctx, format, arg...)	\
+#define mana_dbg(ctx, format, arg...)		\
 	mana_trace(ctx, MANA_DBG, format, ##arg)
-#define mana_trc_info(ctx, format, arg...)	\
+#define mana_info(ctx, format, arg...)		\
 	mana_trace(ctx, MANA_INFO, format, ##arg)
-#define mana_trc_warn(ctx, format, arg...)	\
+#define mana_warn(ctx, format, arg...)		\
 	mana_trace(ctx, MANA_WARNING, format, ##arg)
-#define mana_trc_err(ctx, format, arg...)	\
+#define mana_err(ctx, format, arg...)		\
 	mana_trace(ctx, MANA_ALERT, format, ##arg)
 
 #define unlikely(x)	__predict_false(!!(x))

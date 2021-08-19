@@ -117,7 +117,7 @@ mana_gd_query_max_resources(device_t dev)
 		return err ? err : EPROTO;
 	}
 
-	mana_trc_dbg(NULL, "max_msix %u, max_eq %u, max_cq %u, "
+	mana_dbg(NULL, "max_msix %u, max_eq %u, max_cq %u, "
 	    "max_sq %u, max_rq %u\n",
 	    resp.max_msix, resp.max_eq, resp.max_cq,
 	    resp.max_sq, resp.max_rq);
@@ -175,7 +175,7 @@ mana_gd_detect_devices(device_t dev)
 		gd_dev = resp.devs[i];
 		dev_type = gd_dev.type;
 
-		mana_trc_dbg(NULL, "gdma dev %d, type %u\n",
+		mana_dbg(NULL, "gdma dev %d, type %u\n",
 		    i, dev_type);
 
 		/* HWC is already detected in mana_hwc_create_channel(). */
@@ -329,7 +329,7 @@ int mana_gd_disable_queue(struct gdma_queue *queue)
 	int err;
 
 	if (queue->type != GDMA_EQ)
-		mana_trc_warn(NULL, "Not event queue type 0x%x\n",
+		mana_warn(NULL, "Not event queue type 0x%x\n",
 		    queue->type);
 
 	mana_gd_init_req_hdr(&req.hdr, GDMA_DISABLE_QUEUE,
@@ -398,7 +398,7 @@ mana_gd_ring_doorbell(struct gdma_context *gc, uint32_t db_index,
 		break;
 
 	default:
-		mana_trc_warn(NULL, "Invalid queue type 0x%x\n", q_type);
+		mana_warn(NULL, "Invalid queue type 0x%x\n", q_type);
 		return;
 	}
 
@@ -455,7 +455,7 @@ mana_gd_process_eqe(struct gdma_queue *eq)
 	case GDMA_EQE_COMPLETION:
 		cq_id = eqe->details[0] & 0xFFFFFF;
 		if (cq_id >= gc->max_num_cqs) {
-			mana_trc_warn(NULL,
+			mana_warn(NULL,
 			    "failed: cq_id %u > max_num_cqs %u\n",
 			    cq_id, gc->max_num_cqs);
 			break;
@@ -463,7 +463,7 @@ mana_gd_process_eqe(struct gdma_queue *eq)
 
 		cq = gc->cq_table[cq_id];
 		if (!cq || cq->type != GDMA_CQ || cq->id != cq_id) {
-			mana_trc_warn(NULL,
+			mana_warn(NULL,
 			    "failed: invalid cq_id %u\n", cq_id);
 			break;
 		}
@@ -476,7 +476,7 @@ mana_gd_process_eqe(struct gdma_queue *eq)
 	case GDMA_EQE_TEST_EVENT:
 		gc->test_event_eq_id = eq->id;
 
-		mana_trc_dbg(NULL,
+		mana_dbg(NULL,
 		    "EQE TEST EVENT received for EQ %u\n", eq->id);
 
 		complete(&gc->eq_test_event);
@@ -705,7 +705,7 @@ mana_gd_register_irq(struct gdma_queue *queue,
 	else
 		gic->handler = mana_gd_process_eq_events;
 
-	mana_trc_dbg(NULL, "registered msix index %d vector %d irq %ju\n",
+	mana_dbg(NULL, "registered msix index %d vector %d irq %ju\n",
 	    msi_index, gic->msix_e.vector, rman_get_start(gic->res));
 
 	return 0;
@@ -738,7 +738,7 @@ mana_gd_deregiser_irq(struct gdma_queue *queue)
 
 	queue->eq.msix_index = INVALID_PCI_MSIX_INDEX;
 
-	mana_trc_dbg(NULL, "deregistered msix index %d vector %d irq %ju\n",
+	mana_dbg(NULL, "deregistered msix index %d vector %d irq %ju\n",
 	    msix_index, gic->msix_e.vector, rman_get_start(gic->res));
 }
 
@@ -978,12 +978,12 @@ mana_gd_create_dma_region(struct gdma_dev *gd,
 	int i;
 
 	if (length < PAGE_SIZE || !is_power_of_2(length)) {
-		mana_trc_err(NULL, "gmi size incorrect: %u\n", length);
+		mana_err(NULL, "gmi size incorrect: %u\n", length);
 		return EINVAL;
 	}
 
 	if (offset_in_page((uint64_t)gmi->virt_addr) != 0) {
-		mana_trc_err(NULL, "gmi not page aligned: %p\n",
+		mana_err(NULL, "gmi not page aligned: %p\n",
 		    gmi->virt_addr);
 		return EINVAL;
 	}
@@ -991,7 +991,7 @@ mana_gd_create_dma_region(struct gdma_dev *gd,
 	hwc = gc->hwc.driver_data;
 	req_msg_size = sizeof(*req) + num_page * sizeof(uint64_t);
 	if (req_msg_size > hwc->max_req_msg_size) {
-		mana_trc_err(NULL, "req msg size too large: %u, %u\n",
+		mana_err(NULL, "req msg size too large: %u, %u\n",
 		    req_msg_size, hwc->max_req_msg_size);
 		return EINVAL;
 	}
@@ -1209,7 +1209,7 @@ mana_gd_register_device(struct gdma_dev *gd)
 	gd->gpa_mkey = resp.gpa_mkey;
 	gd->doorbell = resp.db_id;
 
-	mana_trc_dbg(NULL, "mana device pdid %u, gpa_mkey %u, doorbell %u \n",
+	mana_dbg(NULL, "mana device pdid %u, gpa_mkey %u, doorbell %u \n",
 	    gd->pdid, gd->gpa_mkey, gd->doorbell);
 
 	return 0;
@@ -1254,7 +1254,7 @@ mana_gd_wq_avail_space(struct gdma_queue *wq)
 	uint32_t wq_size = wq->queue_size;
 
 	if (used_space > wq_size) {
-		mana_trc_warn(NULL, "failed: used space %u > queue size %u\n",
+		mana_warn(NULL, "failed: used space %u > queue size %u\n",
 		    used_space, wq_size);
 	}
 
@@ -1268,7 +1268,7 @@ mana_gd_get_wqe_ptr(const struct gdma_queue *wq, uint32_t wqe_offset)
 	    (wqe_offset * GDMA_WQE_BU_SIZE) & (wq->queue_size - 1);
 
 	if ((offset + GDMA_WQE_BU_SIZE) > wq->queue_size) {
-		mana_trc_warn(NULL, "failed: write end out of queue bound %u, "
+		mana_warn(NULL, "failed: write end out of queue bound %u, "
 		    "queue size %u\n",
 		    offset + GDMA_WQE_BU_SIZE, wq->queue_size);
 	}
@@ -1293,7 +1293,7 @@ mana_gd_write_client_oob(const struct gdma_wqe_request *wqe_req,
 
 	if (oob_in_sgl) {
 		if (!pad_data || wqe_req->num_sge < 2) {
-			mana_trc_warn(NULL, "no pad_data or num_sge < 2\n");
+			mana_warn(NULL, "no pad_data or num_sge < 2\n");
 		}
 
 		header->client_oob_in_sgl = 1;
@@ -1503,7 +1503,7 @@ mana_gd_alloc_res_map(uint32_t res_avail,
 	r->size = res_avail;
 	mtx_init(&r->lock_spin, lock_name, NULL, MTX_SPIN);
 
-	mana_trc_dbg(NULL,
+	mana_dbg(NULL,
 	    "total res %u, total number of unsigned longs %u\n",
 	    r->size, n);
 	return (0);
@@ -1533,7 +1533,7 @@ mana_gd_init_registers(struct gdma_context *gc)
 	gc->shm_base =
 	    (void *) (bar0_va + mana_gd_r64(gc, GDMA_REG_SHM_OFFSET));
 
-	mana_trc_dbg(NULL, "db_page_size 0x%xx, db_page_base %p,"
+	mana_dbg(NULL, "db_page_size 0x%xx, db_page_base %p,"
 		    " shm_base %p\n",
 		    gc->db_page_size, gc->db_page_base, gc->shm_base);
 }
@@ -1563,7 +1563,7 @@ mana_gd_alloc_bar(device_t dev, int bar)
 	res = bus_alloc_resource_any(dev, type, &rid, RF_ACTIVE);
 #if defined(__amd64__)
 	if (res)
-		mana_trc_dbg(NULL, "bar %d: rid 0x%x, type 0x%jx,"
+		mana_dbg(NULL, "bar %d: rid 0x%x, type 0x%jx,"
 		    " handle 0x%jx\n",
 		    bar, rid, res->r_bustag, res->r_bushandle);
 #endif
@@ -1664,7 +1664,7 @@ mana_gd_setup_irqs(device_t dev)
 		}
 		gic->requested = true;
 
-		mana_trc_dbg(NULL, "added msix vector %d irq %ju\n",
+		mana_dbg(NULL, "added msix vector %d irq %ju\n",
 		    gic->msix_e.vector, rman_get_start(gic->res));
 	}
 
@@ -1679,7 +1679,7 @@ mana_gd_setup_irqs(device_t dev)
 	gc->max_num_msix = nvec;
 	gc->num_msix_usable = nvec;
 
-	mana_trc_dbg(NULL, "setup %d msix interrupts\n", nvec);
+	mana_dbg(NULL, "setup %d msix interrupts\n", nvec);
 
 	return (0);
 
@@ -1776,7 +1776,7 @@ mana_gd_probe(device_t dev)
 	while (ent->vendor_id != 0) {
 		if ((pci_vendor_id == ent->vendor_id) &&
 		    (pci_device_id == ent->device_id)) {
-			mana_trc_dbg(NULL, "vendor=%x device=%x\n",
+			mana_dbg(NULL, "vendor=%x device=%x\n",
 			    pci_vendor_id, pci_device_id);
 
 			sprintf(adapter_name, DEVICE_DESC);
@@ -1828,7 +1828,7 @@ mana_gd_attach(device_t dev)
 	/* Map MSI-x vector table */
 	msix_rid = pci_msix_table_bar(dev);
 
-	mana_trc_dbg(NULL, "msix_rid 0x%x\n", msix_rid);
+	mana_dbg(NULL, "msix_rid 0x%x\n", msix_rid);
 
 	gc->msix = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
 	    &msix_rid, RF_ACTIVE);
@@ -1859,7 +1859,7 @@ mana_gd_attach(device_t dev)
 
 	rc = mana_hwc_create_channel(gc);
 	if (rc) {
-		mana_trc_dbg(NULL, "Failed to create hwc channel\n");
+		mana_dbg(NULL, "Failed to create hwc channel\n");
 		if (rc == EIO)
 			goto err_clean_up_gdma;
 		else
@@ -1868,25 +1868,25 @@ mana_gd_attach(device_t dev)
 
 	rc = mana_gd_verify_vf_version(dev);
 	if (rc) {
-		mana_trc_dbg(NULL, "Failed to verify vf\n");
+		mana_dbg(NULL, "Failed to verify vf\n");
 		goto err_clean_up_gdma;
 	}
 
 	rc = mana_gd_query_max_resources(dev);
 	if (rc) {
-		mana_trc_dbg(NULL, "Failed to query max resources\n");
+		mana_dbg(NULL, "Failed to query max resources\n");
 		goto err_clean_up_gdma;
 	}
 
 	rc = mana_gd_detect_devices(dev);
 	if (rc) {
-		mana_trc_dbg(NULL, "Failed to detect  mana device\n");
+		mana_dbg(NULL, "Failed to detect  mana device\n");
 		goto err_clean_up_gdma;
 	}
 
 	rc = mana_probe(&gc->mana);
 	if (rc) {
-		mana_trc_dbg(NULL, "Failed to probe mana device\n");
+		mana_dbg(NULL, "Failed to probe mana device\n");
 		goto err_clean_up_gdma;
 	}
 

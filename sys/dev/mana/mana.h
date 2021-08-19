@@ -380,8 +380,6 @@ struct mana_recv_buf_oob {
 	/* A valid GDMA work request representing the data buffer. */
 	struct gdma_wqe_request		wqe_req;
 
-	//void				*buf_va;	/* Virtual addr */
-	//bus_addr_t			buf_dma_addr;	/* Physical addr */
 	struct mbuf			*mbuf;
 	bus_dmamap_t			dma_map;
 

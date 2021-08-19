@@ -108,7 +108,7 @@ mana_ifmedia_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 
 	if (!apc->port_is_up) {
 		MANA_APC_LOCK_UNLOCK(apc);
-		mana_trc_info(NULL, "Port %u link is down\n", apc->port_idx);
+		mana_info(NULL, "Port %u link is down\n", apc->port_idx);
 		return;
 	}
 
@@ -205,7 +205,7 @@ mana_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 
 		apc->frame_size = new_mtu + 18;
 		if_setmtu(ifp, new_mtu);
-		mana_trc_dbg(NULL, "Set MTU to %d\n", new_mtu);
+		mana_dbg(NULL, "Set MTU to %d\n", new_mtu);
 
 		rc = mana_up(apc);
 		MANA_APC_LOCK_UNLOCK(apc);
@@ -319,7 +319,7 @@ mana_tx_map_mbuf(struct mana_port_context *apc,
 			*m_head = m = m_new;
 		}
 
-		mana_trc_warn(NULL,
+		mana_warn(NULL,
 		    "Too many segs in orig mbuf, m_collapse called\n");
 
 		err = bus_dmamap_load_mbuf_sg(apc->tx_buf_tag,
@@ -390,7 +390,7 @@ mana_load_rx_mbuf(struct mana_port_context *apc, struct mana_rxq *rxq,
 	    mbuf, segs, &nsegs, BUS_DMA_NOWAIT);
 
 	if (unlikely((err != 0) || (nsegs != 1))) {
-		mana_trc_warn(NULL, "Failed to map mbuf, error: %d, "
+		mana_warn(NULL, "Failed to map mbuf, error: %d, "
 		    "nsegs: %d\n", err, nsegs);
 		counter_u64_add(rxq->stats.dma_mapping_err, 1);
 		goto error;
@@ -497,7 +497,7 @@ mana_xmit(struct mana_txq *txq)
 
 		err = mana_tx_map_mbuf(apc, tx_info, &mbuf, &pkg, tx_stats);
 		if (unlikely(err)) {
-			mana_trc_dbg(NULL,
+			mana_dbg(NULL,
 			    "Failed to map tx mbuf, err %d\n", err);
 
 			counter_u64_add(tx_stats->dma_mapping_err, 1);
@@ -671,7 +671,7 @@ mana_tso_fixup(struct mbuf *mbuf)
 		ip6 = mtodo(mbuf, ehlen);
 		if (ip6->ip6_nxt != IPPROTO_TCP) {
 			/* Realy something wrong, just return */
-			mana_trc_dbg(NULL, "TSO mbuf not TCP, freed.\n");
+			mana_dbg(NULL, "TSO mbuf not TCP, freed.\n");
 			m_freem(mbuf);
 			return NULL;
 		}
@@ -683,7 +683,7 @@ mana_tso_fixup(struct mbuf *mbuf)
 		th->th_sum = in6_cksum_pseudo(ip6, 0, IPPROTO_TCP, 0);
 	} else {
 		/* CSUM_TSO is set but not IP protocol. */
-		mana_trc_warn(NULL, "TSO mbuf not right, freed.\n");
+		mana_warn(NULL, "TSO mbuf not right, freed.\n");
 		m_freem(mbuf);
 		return NULL;
 	}
@@ -788,7 +788,7 @@ mana_start_xmit(struct ifnet *ifp, struct mbuf *m)
 	is_drbr_empty = drbr_empty(ifp, txq->txq_br);
 	err = drbr_enqueue(ifp, txq->txq_br, m);
 	if (unlikely(err)) {
-		mana_trc_warn(NULL, "txq %u failed to enqueue: %d\n",
+		mana_warn(NULL, "txq %u failed to enqueue: %d\n",
 		    txq_id, err);
 		taskqueue_enqueue(txq->enqueue_tq, &txq->enqueue_task);
 		return err;
@@ -889,7 +889,7 @@ mana_send_request(struct mana_context *ac, void *in_buf,
 	req->dev_id = gc->mana.dev_id;
 	req->activity_id = atomic_inc_return(&activity_id);
 
-	mana_trc_dbg(NULL, "activity_id  = %u\n", activity_id);
+	mana_dbg(NULL, "activity_id  = %u\n", activity_id);
 
 	err = mana_gd_send_request(gc, in_len, in_buf, out_len,
 	    out_buf);
@@ -963,7 +963,7 @@ mana_query_device_cfg(struct mana_context *ac, uint32_t proto_major_ver,
 
 	*max_num_vports = resp.max_num_vports;
 
-	mana_trc_dbg(NULL, "mana max_num_vports from device = %d\n",
+	mana_dbg(NULL, "mana max_num_vports from device = %d\n",
 	    *max_num_vports);
 
 	return 0;
@@ -1266,7 +1266,7 @@ mana_move_wq_tail(struct gdma_queue *wq, uint32_t num_units)
 	used_space_new = wq->head - (wq->tail + num_units);
 
 	if (used_space_new > used_space_old) {
-		mana_trc_err(NULL,
+		mana_err(NULL,
 		    "WARNING: new used space %u greater than old one %u\n",
 		    used_space_new, used_space_old);
 		return ERANGE;
@@ -1309,14 +1309,14 @@ mana_poll_tx_cq(struct mana_cq *cq)
 		struct mana_tx_comp_oob *cqe_oob;
 
 		if (!completions[i].is_sq) {
-			mana_trc_err(NULL, "WARNING: Not for SQ\n");
+			mana_err(NULL, "WARNING: Not for SQ\n");
 			return;
 		}
 
 		cqe_oob = (struct mana_tx_comp_oob *)completions[i].cqe_data;
 		if (cqe_oob->cqe_hdr.client_type !=
 				 MANA_CQE_COMPLETION) {
-			mana_trc_err(NULL,
+			mana_err(NULL,
 			    "WARNING: Invalid CQE client type %u\n",
 			    cqe_oob->cqe_hdr.client_type);
 			return;
@@ -1336,7 +1336,7 @@ mana_poll_tx_cq(struct mana_cq *cq)
 		case CQE_TX_VPORT_DISABLED:
 		case CQE_TX_VLAN_TAGGING_VIOLATION:
 			sa_drop ++;
-			mana_trc_err(NULL,
+			mana_err(NULL,
 			    "TX: txq %d CQE error %d, ntc = %d, "
 			    "pending sends = %d: err ignored.\n",
 			    txq_idx, cqe_oob->cqe_hdr.cqe_type,
@@ -1347,14 +1347,14 @@ mana_poll_tx_cq(struct mana_cq *cq)
 			/* If the CQE type is unexpected, log an error,
 			 * and go through the error path.
 			 */
-			mana_trc_err(NULL,
+			mana_err(NULL,
 			    "ERROR: TX: Unexpected CQE type %d: HW BUG?\n",
 			    cqe_oob->cqe_hdr.cqe_type);
 			return;
 		}
 		/* XXX: ~0x300 to work around buggy FPGA image sine 5/2021*/
 		if (txq->gdma_txq_id != (completions[i].wq_num & ~0x300)) {
-			mana_trc_dbg(NULL,
+			mana_dbg(NULL,
 			    "txq gdma id not match completion wq num: "
 			    "%d != %d\n",
 			    txq->gdma_txq_id, completions[i].wq_num);
@@ -1363,7 +1363,7 @@ mana_poll_tx_cq(struct mana_cq *cq)
 
 		tx_info = &txq->tx_buf_info[next_to_complete];
 		if (!tx_info->mbuf) {
-			mana_trc_err(NULL,
+			mana_err(NULL,
 			    "WARNING: txq %d Empty mbuf on tx_info: %u, "
 			    "ntu = %u, pending_sends = %d, "
 			    "transmitted = %d, sa_drop = %d, i = %d, comp_read = %d\n",
@@ -1388,7 +1388,7 @@ mana_poll_tx_cq(struct mana_cq *cq)
 	txq->next_to_complete = next_to_complete;
 
 	if (wqe_unit_cnt == 0) {
-		mana_trc_err(NULL,
+		mana_err(NULL,
 		    "WARNING: TX ring not proceeding!\n");
 		return;
 	}
@@ -1437,7 +1437,7 @@ mana_poll_tx_cq(struct mana_cq *cq)
 	}
 
 	if (atomic_sub_return(pkt_transmitted, &txq->pending_sends) < 0)
-		mana_trc_err(NULL,
+		mana_err(NULL,
 		    "WARNING: TX %d pending_sends error: %d\n",
 		    txq->idx, txq->pending_sends);
 }
@@ -1458,13 +1458,13 @@ mana_post_pkt_rxq(struct mana_rxq *rxq)
 	err = mana_gd_post_and_ring(rxq->gdma_rq, &recv_buf_oob->wqe_req,
 	    &recv_buf_oob->wqe_inf);
 	if (err) {
-		mana_trc_err(NULL, "WARNING: rxq %u post pkt err %d\n",
+		mana_err(NULL, "WARNING: rxq %u post pkt err %d\n",
 		    rxq->rxq_idx, err);
 		return;
 	}
 
 	if (recv_buf_oob->wqe_inf.wqe_size_in_bu != 1) {
-		mana_trc_err(NULL, "WARNING: rxq %u wqe_size_in_bu %u\n",
+		mana_err(NULL, "WARNING: rxq %u wqe_size_in_bu %u\n",
 		    rxq->rxq_idx, recv_buf_oob->wqe_inf.wqe_size_in_bu);
 	}
 }
@@ -1626,7 +1626,7 @@ mana_process_rx_cqe(struct mana_rxq *rxq, struct mana_cq *cq,
 	curr = rxq->buf_index;
 	rxbuf_oob = &rxq->rx_oobs[curr];
 	if (rxbuf_oob->wqe_inf.wqe_size_in_bu != 1) {
-		mana_trc_err(NULL, "WARNING: Rx Incorrect complete "
+		mana_err(NULL, "WARNING: Rx Incorrect complete "
 		    "WQE size %u\n",
 		    rxbuf_oob->wqe_inf.wqe_size_in_bu);
 	}
@@ -1641,7 +1641,7 @@ mana_process_rx_cqe(struct mana_rxq *rxq, struct mana_cq *cq,
 	/* Load a new mbuf to replace the old one */
 	err = mana_load_rx_mbuf(apc, rxq, rxbuf_oob, true);
 	if (err) {
-		mana_trc_dbg(NULL,
+		mana_dbg(NULL,
 		    "failed to load rx mbuf, err = %d, packet dropped.\n",
 		    err);
 		counter_u64_add(rxq->stats.mbuf_alloc_fail, 1);
@@ -1674,14 +1674,14 @@ mana_poll_rx_cq(struct mana_cq *cq)
 
 	for (i = 0; i < comp_read; i++) {
 		if (comp[i].is_sq == true) {
-			mana_trc_err(NULL,
+			mana_err(NULL,
 			    "WARNING: CQE not for receive queue\n");
 			return;
 		}
 
 		/* verify recv cqe references the right rxq */
 		if (comp[i].wq_num != cq->rxq->gdma_id) {
-			mana_trc_err(NULL,
+			mana_err(NULL,
 			    "WARNING: Received CQE %d  not for "
 			    "this receive queue %d\n",
 			    comp[i].wq_num,  cq->rxq->gdma_id);
@@ -1734,13 +1734,13 @@ mana_deinit_txq(struct mana_port_context *apc, struct mana_txq *txq)
 		return;
 
 	if ((pending_sends = atomic_read(&txq->pending_sends)) > 0) {
-		mana_trc_err(NULL,
+		mana_err(NULL,
 		    "WARNING: txq pending sends not zero: %u\n",
 		    pending_sends);
 	}
 
 	if (txq->next_to_use != txq->next_to_complete) {
-		mana_trc_err(NULL,
+		mana_err(NULL,
 		    "WARNING: txq buf not completed, "
 		    "next use %u, next complete %u\n",
 		    txq->next_to_use, txq->next_to_complete);
@@ -1903,7 +1903,7 @@ mana_create_txq(struct mana_port_context *apc, struct ifnet *net)
 
 		cq->gdma_id = cq->gdma_cq->id;
 
-		mana_trc_dbg(NULL,
+		mana_dbg(NULL,
 		    "txq %d, txq gdma id %d, txq cq gdma id %d\n",
 		    i, txq->gdma_txq_id, cq->gdma_id);;
 
@@ -1978,8 +1978,9 @@ mana_destroy_rxq(struct mana_port_context *apc, struct mana_rxq *rxq,
 		return;
 
 	if (validate_state) {
-		// should we flush and stor Q here?
-		// Cancel and drain cleanup task queue here.
+		/*
+		 * XXX Cancel and drain cleanup task queue here.
+		 */
 		;
 	}
 
@@ -2020,7 +2021,7 @@ mana_alloc_rx_wqe(struct mana_port_context *apc,
 	int err;
 
 	if (rxq->datasize == 0 || rxq->datasize > PAGE_SIZE) {
-		mana_trc_err(NULL,
+		mana_err(NULL,
 		    "WARNING: Invalid rxq datasize %u\n", rxq->datasize);
 	}
 
@@ -2034,7 +2035,7 @@ mana_alloc_rx_wqe(struct mana_port_context *apc,
 		err = bus_dmamap_create(apc->rx_buf_tag, 0,
 		    &rx_oob->dma_map);
 		if (err) {
-			mana_trc_err(NULL,
+			mana_err(NULL,
 			    "Failed to  create rx DMA map for buf %d\n",
 			    buf_idx);
 			return err;
@@ -2042,7 +2043,7 @@ mana_alloc_rx_wqe(struct mana_port_context *apc,
 
 		err = mana_load_rx_mbuf(apc, rxq, rx_oob, true);
 		if (err) {
-			mana_trc_err(NULL,
+			mana_err(NULL,
 			    "Failed to  create rx DMA map for buf %d\n",
 			    buf_idx);
 			bus_dmamap_destroy(apc->rx_buf_tag, rx_oob->dma_map);
@@ -2116,7 +2117,7 @@ mana_create_rxq(struct mana_port_context *apc, uint32_t rxq_idx,
 	if (rxq->datasize > MAX_FRAME_SIZE)
 		rxq->datasize = MAX_FRAME_SIZE;
 
-	mana_trc_dbg(NULL, "Setting rxq %d datasize %d\n",
+	mana_dbg(NULL, "Setting rxq %d datasize %d\n",
 	    rxq_idx, rxq->datasize);
 
 	rxq->rxobj = INVALID_MANA_HANDLE;
@@ -2382,11 +2383,11 @@ mana_up(struct mana_port_context *apc)
 {
 	int err;
 
-	mana_trc_dbg(NULL, "mana_up called\n");
+	mana_dbg(NULL, "mana_up called\n");
 
 	err = mana_alloc_queues(apc->ndev);
 	if (err) {
-		mana_trc_err(NULL, "Faile alloc mana queues: %d\n", err);
+		mana_err(NULL, "Faile alloc mana queues: %d\n", err);
 		return err;
 	}
 
@@ -2538,7 +2539,7 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 
 	ndev = if_alloc_dev(IFT_ETHER, gc->dev);
 	if (!ndev) {
-		mana_trc_err(NULL, "Failed to allocate ifnet struct\n");
+		mana_err(NULL, "Failed to allocate ifnet struct\n");
 		return ENOMEM;
 	}
 
@@ -2546,7 +2547,7 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 
 	apc = malloc(sizeof(*apc), M_DEVBUF, M_WAITOK | M_ZERO);
 	if (!apc) {
-		mana_trc_err(NULL, "Failed to allocate port context\n");
+		mana_err(NULL, "Failed to allocate port context\n");
 		err = ENOMEM;
 		goto free_net;
 	}
