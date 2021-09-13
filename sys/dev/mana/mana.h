@@ -351,6 +351,8 @@ struct mana_tx_comp_oob {
 
 struct mana_rxq;
 
+#define CQE_POLLING_BUFFER	512
+
 struct mana_cq {
 	struct gdma_queue	*gdma_cq;
 
@@ -370,8 +372,18 @@ struct mana_cq {
 	 */
 	struct mana_txq		*txq;
 
-	/* Pointer to a buffer which the CQ handler can copy the CQE's into. */
-	struct gdma_comp	*gdma_comp_buf;
+	/* Taskqueue and related structs */
+	struct task		cleanup_task;
+	struct taskqueue	*cleanup_tq;
+	int			cpu;
+	bool			do_not_ring_db;
+
+	/* Budget for one cleanup task */
+	int			work_done;
+	int			budget;
+
+	/* Buffer which the CQ handler can copy the CQE's into. */
+	struct gdma_comp	gdma_comp_buf[CQE_POLLING_BUFFER];
 };
 
 #define GDMA_MAX_RQE_SGES	15
@@ -503,7 +515,10 @@ struct mana_port_context {
 	bool			port_st_save; /* Saved port state */
 
 	bool			enable_tx_altq;
+
 	bool			bind_cleanup_thread_cpu;
+	int			last_tx_cq_bind_cpu;
+	int			last_rx_cq_bind_cpu;
 
 	struct mana_port_stats	port_stats;
 
