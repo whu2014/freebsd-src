@@ -1507,10 +1507,8 @@ mana_gd_setup_irqs(device_t dev)
 	if (max_queues_per_port > MANA_MAX_NUM_QUEUES)
 		max_queues_per_port = MANA_MAX_NUM_QUEUES;
 
-	max_irqs = max_queues_per_port * MAX_PORTS_IN_MANA_DEV;
-
 	/* Need 1 interrupt for the Hardware communication Channel (HWC) */
-	max_irqs++;
+	max_irqs = max_queues_per_port + 1;
 
 	nvec = max_irqs;
 	rc = pci_alloc_msix(dev, &nvec);

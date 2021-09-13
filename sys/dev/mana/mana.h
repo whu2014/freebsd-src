@@ -116,7 +116,7 @@ enum TRI_STATE {
 #define LOG2_EQ_THROTTLE		3
 
 #if 1 /* XXX */
-#define MAX_PORTS_IN_MANA_DEV		1
+#define MAX_PORTS_IN_MANA_DEV		8
 #else
 #define MAX_PORTS_IN_MANA_DEV		16
 #endif
@@ -463,6 +463,8 @@ struct mana_context {
 
 	uint16_t		num_ports;
 
+	struct mana_eq		*eqs;
+
 	struct ifnet		*ports[MAX_PORTS_IN_MANA_DEV];
 };
 
@@ -478,8 +480,6 @@ struct mana_port_context {
 	bus_dma_tag_t		tx_buf_tag;
 
 	uint8_t			mac_addr[ETHER_ADDR_LEN];
-
-	struct mana_eq		*eqs;
 
 	enum TRI_STATE		rss_state;
 

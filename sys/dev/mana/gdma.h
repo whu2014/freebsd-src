@@ -361,9 +361,6 @@ struct gdma_queue_spec {
 			void			*context;
 
 			unsigned long		log2_throttle_limit;
-
-			/* Only used by the MANA device. */
-			struct ifnet		*ndev;
 		} eq;
 
 		struct {
