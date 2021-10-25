@@ -108,7 +108,7 @@ mana_ifmedia_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 
 	if (!apc->port_is_up) {
 		MANA_APC_LOCK_UNLOCK(apc);
-		mana_info(NULL, "Port %u link is down\n", apc->port_idx);
+		mana_dbg(NULL, "Port %u link is down\n", apc->port_idx);
 		return;
 	}
 
