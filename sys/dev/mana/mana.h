@@ -115,11 +115,7 @@ enum TRI_STATE {
 #define EQ_SIZE				(8 * PAGE_SIZE)
 #define LOG2_EQ_THROTTLE		3
 
-#if 1 /* XXX */
 #define MAX_PORTS_IN_MANA_DEV		8
-#else
-#define MAX_PORTS_IN_MANA_DEV		16
-#endif
 
 struct mana_send_buf_info {
 	struct mbuf			*mbuf;
