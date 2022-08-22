@@ -414,6 +414,7 @@ struct gdma_context {
 	int			msix_rid;
 	void __iomem		*shm_base;
 	void __iomem		*db_page_base;
+	vm_paddr_t		phys_db_page_base;
 	uint32_t		db_page_size;
 
 	/* Shared memory chanenl (used to bootstrap HWC) */

@@ -1448,11 +1448,15 @@ static void
 mana_gd_init_registers(struct gdma_context *gc)
 {
 	uint64_t bar0_va = rman_get_bushandle(gc->bar0);
+	vm_paddr_t bar0_pa = rman_get_start(gc->bar0);
 
 	gc->db_page_size = mana_gd_r32(gc, GDMA_REG_DB_PAGE_SIZE) & 0xFFFF;
 
 	gc->db_page_base =
 	    (void *) (bar0_va + mana_gd_r64(gc, GDMA_REG_DB_PAGE_OFFSET));
+
+	gc->phys_db_page_base =
+	    bar0_pa + mana_gd_r64(gc, GDMA_REG_DB_PAGE_OFFSET);
 
 	gc->shm_base =
 	    (void *) (bar0_va + mana_gd_r64(gc, GDMA_REG_SHM_OFFSET));
