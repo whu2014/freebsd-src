@@ -980,13 +980,52 @@ mana_query_vport_cfg(struct mana_port_context *apc, uint32_t vport_index,
 	return 0;
 }
 
-static int
+void
+mana_uncfg_vport(struct mana_port_context *apc)
+{
+	MANA_APC_LOCK_LOCK(apc);
+	apc->vport_use_count--;
+	if (apc->vport_use_count < 0) {
+		mana_err(NULL,
+		    "WARNING: vport_use_count less than 0: %u\n",
+		    apc->vport_use_count);
+	}
+	MANA_APC_LOCK_UNLOCK(apc);
+}
+
+int
 mana_cfg_vport(struct mana_port_context *apc, uint32_t protection_dom_id,
     uint32_t doorbell_pg_id)
 {
 	struct mana_config_vport_resp resp = {};
 	struct mana_config_vport_req req = {};
 	int err;
+
+	/* This function is used to program the Ethernet port in the hardware
+	 * table. It can be called from the Ethernet driver or the RDMA driver.
+	 *
+	 * For Ethernet usage, the hardware supports only one active user on a
+	 * physical port. The driver checks on the port usage before programming
+	 * the hardware when creating the RAW QP (RDMA driver) or exposing the
+	 * device to kernel NET layer (Ethernet driver).
+	 *
+	 * Because the RDMA driver doesn't know in advance which QP type the
+	 * user will create, it exposes the device with all its ports. The user
+	 * may not be able to create RAW QP on a port if this port is already
+	 * in used by the Ethernet driver from the kernel.
+	 *
+	 * This physical port limitation only applies to the RAW QP. For RC QP,
+	 * the hardware doesn't have this limitation. The user can create RC
+	 * QPs on a physical port up to the hardware limits independent of the
+	 * Ethernet usage on the same port.
+	 */
+	MANA_APC_LOCK_LOCK(apc);
+	if (apc->vport_use_count > 0) {
+		MANA_APC_LOCK_UNLOCK(apc);
+		return EBUSY;
+	}
+	apc->vport_use_count++;
+	MANA_APC_LOCK_UNLOCK(apc);
 
 	mana_gd_init_req_hdr(&req.hdr, MANA_CONFIG_VPORT_TX,
 	    sizeof(req), sizeof(resp));
@@ -1014,7 +1053,13 @@ mana_cfg_vport(struct mana_port_context *apc, uint32_t protection_dom_id,
 
 	apc->tx_shortform_allowed = resp.short_form_allowed;
 	apc->tx_vp_offset = resp.tx_vport_offset;
+
+	if_printf(apc->ndev, "Configured vPort %lu PD %u DB %u\n",
+	    apc->port_handle, protection_dom_id, doorbell_pg_id);
 out:
+	if (err)
+		mana_uncfg_vport(apc);
+
 	return err;
 }
 
@@ -1078,6 +1123,9 @@ mana_cfg_vport_steering(struct mana_port_context *apc,
 		    resp.hdr.status);
 		err = EPROTO;
 	}
+
+	if_printf(ndev, "Configured steering vPort %lu entries %u\n",
+	    apc->port_handle, num_entries);
 out:
 	free(req, M_DEVBUF);
 	return err;
@@ -2399,6 +2447,8 @@ mana_destroy_vport(struct mana_port_context *apc)
 	}
 
 	mana_destroy_txq(apc);
+
+	mana_uncfg_vport(apc);
 }
 
 static int
@@ -2691,6 +2741,7 @@ mana_probe_port(struct mana_context *ac, int port_idx,
 	apc->frame_size = DEFAULT_FRAME_SIZE;
 	apc->last_tx_cq_bind_cpu = -1;
 	apc->last_rx_cq_bind_cpu = -1;
+	apc->vport_use_count = 0;
 
 	MANA_APC_LOCK_INIT(apc);
 

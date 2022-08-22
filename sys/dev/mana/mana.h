@@ -505,6 +505,8 @@ struct mana_port_context {
 
 	mana_handle_t		port_handle;
 
+	int			vport_use_count;
+
 	uint16_t		port_idx;
 
 	uint16_t		frame_size;
@@ -698,5 +700,8 @@ struct mana_tx_package {
 };
 
 int mana_restart(struct mana_port_context *apc);
+int mana_cfg_vport(struct mana_port_context *apc, uint32_t protection_dom_id,
+    uint32_t doorbell_pg_id);
+void mana_uncfg_vport(struct mana_port_context *apc);
 
 #endif /* _MANA_H */
