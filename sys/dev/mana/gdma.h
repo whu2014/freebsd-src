@@ -70,10 +70,14 @@ enum gdma_request_type {
 	GDMA_GENERATE_TEST_EQE		= 10,
 	GDMA_CREATE_QUEUE		= 12,
 	GDMA_DISABLE_QUEUE		= 13,
+	GDMA_ALLOCATE_RESOURCE_RANGE	= 22,
+	GDMA_DESTROY_RESOURCE_RANGE	= 24,
 	GDMA_CREATE_DMA_REGION		= 25,
 	GDMA_DMA_REGION_ADD_PAGES	= 26,
 	GDMA_DESTROY_DMA_REGION		= 27,
 };
+
+#define GDMA_RESOURCE_DOORBELL_PAGE	27
 
 enum gdma_queue_type {
 	GDMA_INVALID_QUEUE,
@@ -616,6 +620,26 @@ struct gdma_register_device_resp {
 	uint32_t db_id;
 }; /* HW DATA */
 
+struct gdma_allocate_resource_range_req {
+	struct gdma_req_hdr hdr;
+	uint32_t resource_type;
+	uint32_t num_resources;
+	uint32_t alignment;
+	uint32_t allocated_resources;
+};
+
+struct gdma_allocate_resource_range_resp {
+	struct gdma_resp_hdr hdr;
+	uint32_t allocated_resources;
+};
+
+struct gdma_destroy_resource_range_req {
+	struct gdma_req_hdr hdr;
+	uint32_t resource_type;
+	uint32_t num_resources;
+	uint32_t allocated_resources;
+};
+
 /* GDMA_CREATE_QUEUE */
 struct gdma_create_queue_req {
 	struct gdma_req_hdr hdr;
@@ -728,4 +752,10 @@ void mana_gd_dma_map_paddr(void *arg, bus_dma_segment_t *segs,
 
 int mana_gd_send_request(struct gdma_context *gc, uint32_t req_len,
     const void *req, uint32_t resp_len, void *resp);
+
+int mana_gd_allocate_doorbell_page(struct gdma_context *gc,
+    int *doorbell_page);
+
+int mana_gd_destroy_doorbell_page(struct gdma_context *gc,
+    int doorbell_page);
 #endif /* _GDMA_H */
