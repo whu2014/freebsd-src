@@ -77,6 +77,10 @@ enum gdma_request_type {
 	GDMA_CREATE_DMA_REGION		= 25,
 	GDMA_DMA_REGION_ADD_PAGES	= 26,
 	GDMA_DESTROY_DMA_REGION		= 27,
+	GDMA_CREATE_PD			= 29,
+	GDMA_DESTROY_PD			= 30,
+	GDMA_CREATE_MR			= 31,
+	GDMA_DESTROY_MR			= 32,
 };
 
 #define GDMA_RESOURCE_DOORBELL_PAGE	27
@@ -109,6 +113,7 @@ enum {
 	GDMA_DEVICE_MANA	= 2,
 };
 
+typedef uint64_t gdma_obj_handle_t;
 
 struct gdma_resource {
 	/* Protect the bitmap */
@@ -246,7 +251,7 @@ struct gdma_mem_info {
 	uint64_t		length;
 
 	/* Allocated by the PF driver */
-	uint64_t		gdma_region;
+	gdma_obj_handle_t	dma_region_handle;
 };
 
 #define REGISTER_ATB_MST_MKEY_LOWER_SIZE 8
@@ -656,7 +661,7 @@ struct gdma_create_queue_req {
 	uint32_t reserved1;
 	uint32_t pdid;
 	uint32_t doolbell_id;
-	uint64_t gdma_region;
+	gdma_obj_handle_t gdma_region;
 	uint32_t reserved2;
 	uint32_t queue_size;
 	uint32_t log2_throttle_limit;
@@ -682,6 +687,28 @@ struct gdma_disable_queue_req {
 	uint32_t queue_index;
 	uint32_t alloc_res_id_on_creation;
 }; /* HW DATA */
+
+enum atb_page_size {
+	ATB_PAGE_SIZE_4K,
+	ATB_PAGE_SIZE_8K,
+	ATB_PAGE_SIZE_16K,
+	ATB_PAGE_SIZE_32K,
+	ATB_PAGE_SIZE_64K,
+	ATB_PAGE_SIZE_128K,
+	ATB_PAGE_SIZE_256K,
+	ATB_PAGE_SIZE_512K,
+	ATB_PAGE_SIZE_1M,
+	ATB_PAGE_SIZE_2M,
+	ATB_PAGE_SIZE_MAX,
+};
+
+enum gdma_mr_access_flags {
+	GDMA_ACCESS_FLAG_LOCAL_READ = BIT(0),
+	GDMA_ACCESS_FLAG_LOCAL_WRITE = BIT(1),
+	GDMA_ACCESS_FLAG_REMOTE_READ = BIT(2),
+	GDMA_ACCESS_FLAG_REMOTE_WRITE = BIT(3),
+	GDMA_ACCESS_FLAG_REMOTE_ATOMIC = BIT(4),
+};
 
 /* GDMA_CREATE_DMA_REGION */
 struct gdma_create_dma_region_req {
@@ -709,14 +736,14 @@ struct gdma_create_dma_region_req {
 
 struct gdma_create_dma_region_resp {
 	struct gdma_resp_hdr hdr;
-	uint64_t gdma_region;
+	gdma_obj_handle_t dma_region_handle;
 }; /* HW DATA */
 
 /* GDMA_DMA_REGION_ADD_PAGES */
 struct gdma_dma_region_add_pages_req {
 	struct gdma_req_hdr hdr;
 
-	uint64_t gdma_region;
+	gdma_obj_handle_t dma_region_handle;
 
 	uint32_t page_addr_list_len;
 	uint32_t reserved3;
@@ -728,8 +755,87 @@ struct gdma_dma_region_add_pages_req {
 struct gdma_destroy_dma_region_req {
 	struct gdma_req_hdr hdr;
 
-	uint64_t gdma_region;
+	gdma_obj_handle_t dma_region_handle;
 }; /* HW DATA */
+
+enum gdma_pd_flags {
+	GDMA_PD_FLAG_INVALID = 0,
+};
+
+struct gdma_create_pd_req {
+	struct gdma_req_hdr hdr;
+	enum gdma_pd_flags flags;
+	uint32_t reserved;
+};/* HW DATA */
+
+struct gdma_create_pd_resp {
+	struct gdma_resp_hdr hdr;
+	gdma_obj_handle_t pd_handle;
+	uint32_t pd_id;
+	uint32_t reserved;
+};/* HW DATA */
+
+struct gdma_destroy_pd_req {
+	struct gdma_req_hdr hdr;
+	gdma_obj_handle_t pd_handle;
+};/* HW DATA */
+
+struct gdma_destory_pd_resp {
+	struct gdma_resp_hdr hdr;
+};/* HW DATA */
+
+enum gdma_mr_type {
+	/* Guest Virtual Address - MRs of this type allow access
+	 * to memory mapped by PTEs associated with this MR using a virtual
+	 * address that is set up in the MST
+	 */
+	GDMA_MR_TYPE_GVA = 2,
+};
+
+struct gdma_create_mr_params {
+	gdma_obj_handle_t pd_handle;
+	enum gdma_mr_type mr_type;
+	union {
+		struct {
+			gdma_obj_handle_t dma_region_handle;
+			uint64_t virtual_address;
+			enum gdma_mr_access_flags access_flags;
+		} gva;
+	};
+};
+
+struct gdma_create_mr_request {
+	struct gdma_req_hdr hdr;
+	gdma_obj_handle_t pd_handle;
+	enum gdma_mr_type mr_type;
+	uint32_t reserved_1;
+
+	union {
+		struct {
+			gdma_obj_handle_t dma_region_handle;
+			uint64_t virtual_address;
+			enum gdma_mr_access_flags access_flags;
+		} gva;
+
+	};
+	uint32_t reserved_2;
+};/* HW DATA */
+
+struct gdma_create_mr_response {
+	struct gdma_resp_hdr hdr;
+	gdma_obj_handle_t mr_handle;
+	uint32_t lkey;
+	uint32_t rkey;
+};/* HW DATA */
+
+struct gdma_destroy_mr_request {
+	struct gdma_req_hdr hdr;
+	gdma_obj_handle_t mr_handle;
+};/* HW DATA */
+
+struct gdma_destroy_mr_response {
+	struct gdma_resp_hdr hdr;
+};/* HW DATA */
 
 int mana_gd_verify_vf_version(device_t dev);
 
@@ -767,4 +873,7 @@ int mana_gd_allocate_doorbell_page(struct gdma_context *gc,
 
 int mana_gd_destroy_doorbell_page(struct gdma_context *gc,
     int doorbell_page);
+
+int mana_gd_destroy_dma_region(struct gdma_context *gc,
+    gdma_obj_handle_t dma_region_handle);
 #endif /* _GDMA_H */
