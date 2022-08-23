@@ -1131,7 +1131,7 @@ out:
 	return err;
 }
 
-static int
+int
 mana_create_wq_obj(struct mana_port_context *apc,
     mana_handle_t vport,
     uint32_t wq_type, struct mana_obj_spec *wq_spec,
@@ -1186,7 +1186,7 @@ out:
 	return err;
 }
 
-static void
+void
 mana_destroy_wq_obj(struct mana_port_context *apc, uint32_t wq_type,
     mana_handle_t wq_obj)
 {

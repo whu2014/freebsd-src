@@ -700,8 +700,18 @@ struct mana_tx_package {
 };
 
 int mana_restart(struct mana_port_context *apc);
+
+int mana_create_wq_obj(struct mana_port_context *apc,
+    mana_handle_t vport,
+    uint32_t wq_type, struct mana_obj_spec *wq_spec,
+    struct mana_obj_spec *cq_spec,
+    mana_handle_t *wq_obj);
+
+void mana_destroy_wq_obj(struct mana_port_context *apc, uint32_t wq_type,
+    mana_handle_t wq_obj);
+
 int mana_cfg_vport(struct mana_port_context *apc, uint32_t protection_dom_id,
     uint32_t doorbell_pg_id);
-void mana_uncfg_vport(struct mana_port_context *apc);
 
+void mana_uncfg_vport(struct mana_port_context *apc);
 #endif /* _MANA_H */
